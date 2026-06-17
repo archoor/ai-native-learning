@@ -1,0 +1,43 @@
+{
+  "name": "ai-native-learning-desktop",
+  "productName": "AiNativeLearning",
+  "version": "0.0.1",
+  "description": "ai-native-learning desktop launcher (Electron shell + Python backend via uv)",
+  "main": "main.js",
+  "author": "xk",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.xk.ainativelearning",
+    "productName": "AiNativeLearning",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "loading.html"
+    ],
+    "compression": "store",
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "AiNativeLearning.exe"
+    }
+  }
+}

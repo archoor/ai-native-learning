@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#E5DECB" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#272C33" media="(prefers-color-scheme: dark)" />
+  <title>AI原生学习</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body data-theme="light" data-view="both" style="--fs:24px">
+  <div class="app">
+    <header class="topbar">
+      <span class="brand" data-i18n="brand">AI原生学习</span>
+
+      <form class="url-area" id="urlForm">
+        <input type="text" id="urlInput" data-i18n-placeholder="urlPlaceholder"
+          data-i18n-title="urlTitle"
+          placeholder="视频链接，或本地视频文件路径（如 E:\videos\demo.mp4）"
+          autocomplete="off" spellcheck="false" />
+        <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flv,.ts" hidden />
+        <button class="btn" id="pickBtn" type="button" data-i18n="pickFile" data-i18n-title="pickFileTitle">选择文件</button>
+        <button class="btn primary" id="loadBtn" type="submit" data-i18n="load">加载</button>
+      </form>
+
+      <span class="spacer"></span>
+
+      <div class="seg-toggle" id="viewToggle">
+        <button data-view="both" class="active" data-i18n="viewBoth">双语</button>
+        <button data-view="source" data-i18n="viewSource">原文</button>
+        <button data-view="target" data-i18n="viewTarget">中文</button>
+      </div>
+
+      <div class="topbar-tools">
+        <button class="icon-btn" id="langBtn" type="button" title="Switch UI language">EN</button>
+        <button class="icon-btn" id="settingsBtn" type="button" data-i18n-title="settingsTitle">⚙</button>
+        <button class="icon-btn" id="themeBtn" type="button" data-i18n-title="themeTitle">🌗</button>
+      </div>
+    </header>
+
+    <div class="banner" id="banner">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="bannerText"></span>
+      <div class="progress-mini" id="bannerProg" style="display:none"><div></div></div>
+    </div>
+
+    <main class="main">
+      <div class="content-col">
+        <div class="empty" id="placeholder">
+          <div class="big">🎬</div>
+          <div data-i18n="placeholderHint">请加载视频文件或链接</div>
+        </div>
+
+        <div class="player-wrap" id="playerWrap" hidden>
+          <div class="video-box" id="videoBox">
+            <video id="video" playsinline controls controlsList="nofullscreen" preload="auto"></video>
+            <div class="caption" id="caption">
+              <div class="cap-source line" id="capSource"></div>
+              <div class="cap-target line" id="capTarget"></div>
+            </div>
+            <button class="fs-btn" id="fsBtn" type="button" title="全屏" aria-label="全屏">⛶</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="learn-panel" id="learnPanel" hidden>
+        <div class="learn-head">
+          <div class="learn-title"><span class="learn-dot"></span> <span data-i18n="learnPanelTitle">学习面板</span> <span class="learn-pill" id="learnModel">—</span></div>
+          <div class="goal-row">
+            <input type="text" id="learnGoal" data-i18n-placeholder="learnGoalPlaceholder" placeholder="输入学习目标 / 主题，回车高亮关联内容…" />
+            <button class="btn primary" id="learnHighlightBtn" type="button" data-i18n="learnHighlight">高亮</button>
+          </div>
+          <div class="learn-hl-prog" id="learnHighlightProg" hidden>
+            <div class="learn-hl-bar"><div id="learnHighlightBar"></div></div>
+            <span id="learnHighlightProgText"></span>
+          </div>
+        </div>
+
+        <div class="learn-tabs" id="learnTabs">
+          <button type="button" class="active" data-stage="learn" data-i18n="learnTabLearn">转录 · 骨架 · 地图</button>
+          <button type="button" data-stage="quiz" data-i18n="learnTabQuiz">自测答题</button>
+          <button type="button" data-stage="feynman" data-i18n="learnTabFeynman">费曼</button>
+          <button type="button" data-stage="report" data-i18n="learnTabReport">报告</button>
+        </div>
+
+        <div class="learn-stage active" id="stage-learn">
+          <div class="learn-toolbar">
+            <div class="seg-toggle" id="learnViewToggle">
+              <button type="button" class="active" data-mode="all" data-i18n="learnViewAll">全文</button>
+              <button type="button" data-mode="rel" data-i18n="learnViewRel">仅关联</button>
+            </div>
+            <span class="spacer"></span>
+            <button class="btn" id="learnOutlineBtn" type="button" data-i18n="learnGenOutline">↻ 生成骨架</button>
+          </div>
+          <div class="learn-body" id="learnBody">
+            <div class="section-h" data-i18n="learnSecTranscript">📝 转录稿</div>
+            <div id="learnTranscript"></div>
+            <div class="section-h outline-only" data-i18n="learnSecSkeleton">🦴 视频骨架</div>
+            <ul class="learn-skeleton outline-only" id="learnSkeleton"></ul>
+            <div class="section-h outline-only" data-i18n="learnSecMap">🗺️ 信息地图</div>
+            <div class="learn-map outline-only" id="learnMap"></div>
+          </div>
+        </div>
+
+        <div class="learn-stage" id="stage-quiz">
+          <div class="learn-body">
+            <div class="quiz-toolbar">
+              <label><span data-i18n="learnQuizCountLabel">题目数量</span> <input type="number" id="quizCount" value="5" min="1" max="20" /></label>
+              <button class="btn primary" id="quizGenBtn" type="button" data-i18n="learnGenQuestions">生成题目</button>
+            </div>
+            <div id="quizCards"></div>
+            <div class="quiz-foot">
+              <button class="btn primary" id="quizGradeBtn" type="button" data-i18n="learnSubmitGrade">提交答案，请 AI 批改</button>
+            </div>
+            <div class="learn-empty" id="quizEmpty" data-i18n="learnQuizEmpty">请先在「转录」页输入学习目标并高亮，再生成题目。</div>
+          </div>
+        </div>
+
+        <div class="learn-stage" id="stage-feynman">
+          <div class="learn-body">
+            <div class="feynman-hint section-h" data-i18n="learnFeynmanHint">费曼大纲（大白话 · 类比 · 不抄原话）</div>
+            <pre class="feynman-outline" id="feynmanOutline"></pre>
+            <textarea id="feynmanDraft" class="feynman-draft" data-i18n-placeholder="learnFeynmanDraftPh" placeholder="合上骨架，凭记忆按 ①~⑤ 讲给外行听…"></textarea>
+            <div class="q-actions">
+              <button type="button" class="mic-btn" id="feynmanMic" data-i18n="learnVoiceInput">🎤 语音输入</button>
+              <button class="btn primary" id="feynmanGradeBtn" type="button" data-i18n="learnSubmitFeynman">提交费曼，请 AI 批改</button>
+            </div>
+            <div id="feynmanGradeBox" class="grade-box" hidden></div>
+            <div id="feynmanChatBox" class="chat-box" hidden>
+              <div class="chat-log" id="feynmanChatLog"></div>
+              <div class="chat-input-row">
+                <input type="text" id="feynmanChatInput" data-i18n-placeholder="learnChatPh" placeholder="追问 / 澄清…" />
+                <button class="btn" id="feynmanChatSend" type="button" data-i18n="learnChatSend">发送</button>
+              </div>
+              <button class="btn primary" id="feynmanConfirmBtn" type="button" data-i18n="learnConfirmFeynman">确认费曼定稿</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="learn-stage" id="stage-report">
+          <div class="learn-body">
+            <div class="quiz-toolbar">
+              <button class="btn primary" id="reportGenBtn" type="button" data-i18n="learnGenReport">生成学习报告</button>
+              <button class="btn" id="reportPersistBtn" type="button" data-i18n="learnPersistKb">入库到知识库</button>
+            </div>
+            <pre class="report-preview" id="reportPreview">完成自测纠错与费曼后，生成报告并入库到 workspace/。</pre>
+            <div class="persist-result" id="persistResult" hidden></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="controls">
+      <div class="ctl-group">
+        <label data-i18n="fontSize">字号</label>
+        <input type="range" id="font" min="16" max="36" step="2" value="24" />
+        <span class="val" id="fontVal">24</span>
+      </div>
+      <div class="ctl-group">
+        <label data-i18n="playbackSpeed">倍速</label>
+        <select id="speed">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1.0×</option>
+          <option value="1.5">1.5×</option>
+          <option value="2">2.0×</option>
+          <option value="2.5">2.5×</option>
+          <option value="3">3.0×</option>
+        </select>
+      </div>
+      <span class="spacer"></span>
+      <span class="meta" id="metaInfo"></span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <div class="modal-backdrop" id="settingsModal" hidden>
+    <div class="modal" role="dialog" aria-labelledby="settingsTitle">
+      <header class="modal-head">
+        <h2 id="settingsTitle" data-i18n="settingsModalTitle">翻译模型设置</h2>
+        <button class="icon-btn modal-close" id="settingsClose" type="button">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="modal-hint" data-i18n="settingsHint">在面板配置 Base URL、API Key 与模型（本地保存）；留空时回退 .env。</p>
+        <div class="form-row">
+          <label for="cfgBaseUrl" data-i18n="cfgBaseUrl">Base URL</label>
+          <input type="url" id="cfgBaseUrl" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="form-row">
+          <label for="cfgApiKey" data-i18n="cfgApiKey">API Key</label>
+          <input type="password" id="cfgApiKey" autocomplete="off" spellcheck="false" />
+          <span class="form-note" data-i18n="cfgApiKeyNote">留空保留已保存的 Key</span>
+        </div>
+        <div class="form-row">
+          <label for="cfgModel" data-i18n="cfgModel">模型</label>
+          <input type="text" id="cfgModel" list="modelSuggestions" autocomplete="off" />
+          <datalist id="modelSuggestions">
+            <option value="qwen3.6-flash"></option>
+            <option value="qwen-flash"></option>
+            <option value="qwen-mt-flash"></option>
+            <option value="qwen-plus"></option>
+            <option value="qwen-turbo"></option>
+          </datalist>
+        </div>
+        <div class="form-row">
+          <label for="cfgTemperature"><span data-i18n="cfgTemperature">Temperature</span> <span id="cfgTemperatureVal" class="form-val"></span></label>
+          <input type="range" id="cfgTemperature" min="0" max="2" step="0.05" />
+        </div>
+        <div class="form-row">
+          <label for="cfgMaxTokens" data-i18n="cfgMaxTokens">Max tokens</label>
+          <input type="number" id="cfgMaxTokens" min="256" max="16384" step="256" />
+        </div>
+        <div class="form-row">
+          <label for="cfgBatchSize" data-i18n="cfgBatchSize">Batch size</label>
+          <input type="number" id="cfgBatchSize" min="1" max="32" step="1" />
+        </div>
+        <div class="form-meta" id="settingsMeta"></div>
+      </div>
+      <footer class="modal-foot">
+        <button class="btn" id="settingsReset" type="button" data-i18n="settingsReset">恢复默认</button>
+        <span class="modal-spacer"></span>
+        <button class="btn" id="settingsCancel" type="button" data-i18n="settingsCancel">取消</button>
+        <button class="btn primary" id="settingsSave" type="button" data-i18n="settingsSave">保存</button>
+      </footer>
+    </div>
+  </div>
+
+  <script src="/i18n.js"></script>
+  <script>
+    I18n.setLocale(I18n.getLocale());
+    I18n.applyPageI18n();
+  </script>
+  <script src="/app.js"></script>
+  <script src="/learning-panel.js"></script>
+</body>
+
+</html>

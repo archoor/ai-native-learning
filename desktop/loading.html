@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI原生学习</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%;
+      background: #ECE6D6; color: #6E6655;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 18px; user-select: none;
+    }
+    .logo { font-size: 44px; }
+    .title { font-size: 17px; font-weight: 600; color: #3F3A30; letter-spacing: .5px; }
+    .tip { font-size: 13px; color: #A89F8A; }
+    .spinner {
+      width: 30px; height: 30px; border-radius: 50%;
+      border: 3px solid #D6CDB4; border-top-color: #2E7D6F;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="logo">🎬</div>
+  <div class="title">AI原生学习</div>
+  <div class="spinner"></div>
+  <div class="tip">正在启动本地服务，请稍候…</div>
+</body>
+</html>
