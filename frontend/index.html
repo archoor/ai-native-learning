@@ -13,7 +13,7 @@
 <body data-theme="light" data-view="both" style="--fs:24px">
   <div class="app">
     <header class="topbar">
-      <span class="brand" data-i18n="brand">AI原生学习</span>
+      <span class="brand"><span class="logo">AI</span><span data-i18n="brand">AI原生学习</span></span>
 
       <form class="url-area" id="urlForm">
         <input type="text" id="urlInput" data-i18n-placeholder="urlPlaceholder"
@@ -24,6 +24,11 @@
         <button class="btn" id="pickBtn" type="button" data-i18n="pickFile" data-i18n-title="pickFileTitle">选择文件</button>
         <button class="btn primary" id="loadBtn" type="submit" data-i18n="load">加载</button>
       </form>
+
+      <div class="history-wrap">
+        <button class="btn" id="historyBtn" type="button" data-i18n="historyBtn" data-i18n-title="historyTitle" aria-haspopup="true" aria-expanded="false">🕘 历史</button>
+        <div class="history-panel" id="historyPanel" hidden></div>
+      </div>
 
       <span class="spacer"></span>
 
@@ -53,7 +58,40 @@
           <div data-i18n="placeholderHint">请加载视频文件或链接</div>
         </div>
 
+        <div class="video-progress" id="vprog" hidden>
+          <div class="ring">
+            <svg width="116" height="116" viewBox="0 0 116 116" aria-hidden="true">
+              <defs>
+                <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#0a84ff" />
+                  <stop offset="1" stop-color="#34c759" />
+                </linearGradient>
+              </defs>
+              <circle class="track" cx="58" cy="58" r="52"></circle>
+              <circle class="bar" id="ringBar" cx="58" cy="58" r="52"></circle>
+            </svg>
+            <div class="pct" id="ringPct">0%</div>
+          </div>
+          <div class="prog-stage" id="progStage"></div>
+          <div class="prog-sub" id="progSub"></div>
+          <div class="steps" id="progSteps">
+            <div class="step" data-step="dl"><div class="node">1</div><div class="name" data-i18n="progStepDownload">下载</div></div>
+            <div class="step-line"></div>
+            <div class="step" data-step="tc"><div class="node">2</div><div class="name" data-i18n="progStepTranscode">转码</div></div>
+            <div class="step-line"></div>
+            <div class="step" data-step="tr"><div class="node">3</div><div class="name" data-i18n="progStepTranscribe">转录</div></div>
+            <div class="step-line"></div>
+            <div class="step" data-step="mt"><div class="node">4</div><div class="name" data-i18n="progStepTranslate">翻译</div></div>
+          </div>
+        </div>
+
         <div class="player-wrap" id="playerWrap" hidden>
+          <div class="subtitle-bar" id="subBar">
+            <span class="sub-dot"></span>
+            <span class="label" id="subLabel"></span>
+            <div class="linebar"><div id="subFill"></div></div>
+            <span class="stat" id="subStat"></span>
+          </div>
           <div class="video-box" id="videoBox">
             <video id="video" playsinline controls controlsList="nofullscreen" preload="auto"></video>
             <div class="caption" id="caption">
@@ -89,14 +127,15 @@
           <div class="learn-toolbar">
             <div class="seg-toggle" id="learnViewToggle">
               <button type="button" class="active" data-mode="all" data-i18n="learnViewAll">全文</button>
+              <button type="button" data-mode="map" data-i18n="learnViewMap">信息地图</button>
               <button type="button" data-mode="rel" data-i18n="learnViewRel">仅关联</button>
             </div>
             <span class="spacer"></span>
-            <button class="btn" id="learnOutlineBtn" type="button" data-i18n="learnGenOutline">↻ 生成骨架</button>
+            <button class="btn" id="learnOutlineBtn" type="button" style="display:none" data-i18n="learnGenOutline">↻ 生成骨架</button>
           </div>
           <div class="learn-body" id="learnBody">
-            <div class="section-h" data-i18n="learnSecTranscript">📝 转录稿</div>
-            <div id="learnTranscript"></div>
+            <div class="section-h transcript-only" data-i18n="learnSecTranscript">📝 转录稿</div>
+            <div id="learnTranscript" class="transcript-only"></div>
             <div class="section-h outline-only" data-i18n="learnSecSkeleton">🦴 视频骨架</div>
             <ul class="learn-skeleton outline-only" id="learnSkeleton"></ul>
             <div class="section-h outline-only" data-i18n="learnSecMap">🗺️ 信息地图</div>
@@ -171,55 +210,161 @@
       </div>
       <span class="spacer"></span>
       <span class="meta" id="metaInfo"></span>
+      <span class="now-playing" id="nowPlaying" title=""></span>
     </footer>
   </div>
 
   <div class="toast" id="toast"></div>
 
   <div class="modal-backdrop" id="settingsModal" hidden>
-    <div class="modal" role="dialog" aria-labelledby="settingsTitle">
+    <div class="modal modal-wide" role="dialog" aria-labelledby="settingsTitle">
       <header class="modal-head">
-        <h2 id="settingsTitle" data-i18n="settingsModalTitle">翻译模型设置</h2>
+        <h2 id="settingsTitle" data-i18n="settingsModalTitle">配置面板</h2>
         <button class="icon-btn modal-close" id="settingsClose" type="button">✕</button>
       </header>
       <div class="modal-body">
-        <p class="modal-hint" data-i18n="settingsHint">在面板配置 Base URL、API Key 与模型（本地保存）；留空时回退 .env。</p>
-        <div class="form-row">
-          <label for="cfgBaseUrl" data-i18n="cfgBaseUrl">Base URL</label>
-          <input type="url" id="cfgBaseUrl" autocomplete="off" spellcheck="false" />
+        <p class="modal-hint" data-i18n="settingsHint">凭据保存在本地；新安装默认为空，未配置的功能将直接报错。</p>
+        <div class="seg-toggle" id="cfgMainTabs">
+          <button type="button" class="active" data-tab="text" data-i18n="cfgTabText">文本模型</button>
+          <button type="button" data-tab="stt" data-i18n="cfgTabStt">转录模型</button>
+          <button type="button" data-tab="proxy" data-i18n="cfgTabProxy">备用下载代理</button>
         </div>
-        <div class="form-row">
-          <label for="cfgApiKey" data-i18n="cfgApiKey">API Key</label>
-          <input type="password" id="cfgApiKey" autocomplete="off" spellcheck="false" />
-          <span class="form-note" data-i18n="cfgApiKeyNote">留空保留已保存的 Key</span>
+
+        <div id="cfgPanelText">
+          <div class="cfg-status warn" id="textStatusBar">
+            <span class="cfg-dot warn"></span>
+            <span id="textStatusText" data-i18n="cfgTextNotReady">文本模型未就绪</span>
+          </div>
+          <div class="cfg-section">
+            <div class="cfg-section-head">
+              <h3 data-i18n="cfgConnTitle">连接凭据</h3>
+              <button class="btn sm" id="testTextConn" type="button" data-i18n="cfgTestConn">测试连接</button>
+            </div>
+            <div class="cfg-section-body">
+              <div class="form-grid-2">
+                <div class="form-row">
+                  <label for="cfgBaseUrl" data-i18n="cfgBaseUrl">Base URL</label>
+                  <input type="url" id="cfgBaseUrl" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="form-row">
+                  <label for="cfgApiKey" data-i18n="cfgApiKey">API Key</label>
+                  <input type="password" id="cfgApiKey" autocomplete="off" spellcheck="false" />
+                  <span class="form-note" data-i18n="cfgApiKeyNote">留空保留已保存的 Key</span>
+                </div>
+              </div>
+              <div class="test-result" id="textConnResult" hidden></div>
+            </div>
+          </div>
+          <div class="cfg-section">
+            <div class="cfg-section-head">
+              <h3 data-i18n="cfgGlobalParams">全局生成参数</h3>
+            </div>
+            <div class="cfg-section-body form-grid-2">
+              <div class="form-row">
+                <label for="cfgTemperature"><span data-i18n="cfgTemperature">Temperature</span> <span id="cfgTemperatureVal" class="form-val">0.30</span></label>
+                <input type="range" id="cfgTemperature" min="0" max="2" step="0.05" value="0.3" />
+              </div>
+              <div class="form-row">
+                <label for="cfgMaxTokens" data-i18n="cfgMaxTokens">Max tokens</label>
+                <input type="number" id="cfgMaxTokens" min="256" max="128000" step="256" value="4096" />
+              </div>
+            </div>
+          </div>
+          <div class="cfg-section">
+            <div class="cfg-section-head"><h3 data-i18n="cfgTaskTitle">按任务配置模型</h3></div>
+            <div class="cfg-section-body task-list" id="cfgTaskList"></div>
+          </div>
         </div>
-        <div class="form-row">
-          <label for="cfgModel" data-i18n="cfgModel">模型</label>
-          <input type="text" id="cfgModel" list="modelSuggestions" autocomplete="off" />
-          <datalist id="modelSuggestions">
-            <option value="qwen3.6-flash"></option>
-            <option value="qwen-flash"></option>
-            <option value="qwen-mt-flash"></option>
-            <option value="qwen-plus"></option>
-            <option value="qwen-turbo"></option>
-          </datalist>
+
+        <div id="cfgPanelStt" hidden>
+          <div class="cfg-status warn" id="sttStatusBar">
+            <span class="cfg-dot warn"></span>
+            <span id="sttStatusText" data-i18n="cfgSttNotReady">转录未就绪</span>
+          </div>
+          <p class="modal-hint" data-i18n="cfgSttHint">三套方案可同时保存；运行时仅「当前使用」所选方案生效。</p>
+          <div class="cfg-section">
+            <div class="cfg-section-head"><h3 data-i18n="cfgSttActiveTitle">当前使用</h3></div>
+            <div class="cfg-section-body use-list" id="sttUseList"></div>
+          </div>
+          <div class="cfg-section">
+            <div class="cfg-section-head"><h3 data-i18n="cfgSttEditTitle">编辑方案配置</h3></div>
+            <div class="cfg-section-body">
+              <div class="seg-toggle" id="sttEditTabs">
+                <button type="button" data-backend="whisper" data-i18n="cfgSttWhisper">本地 Whisper</button>
+                <button type="button" class="active" data-backend="cloud" data-i18n="cfgSttCloud">云端 STT</button>
+                <button type="button" data-backend="funasr" data-i18n="cfgSttFunasr">Fun-ASR</button>
+              </div>
+            </div>
+          </div>
+          <div class="cfg-section stt-form" id="sttFormWhisper" data-backend="whisper" hidden>
+            <div class="cfg-section-head"><h3 data-i18n="cfgSttWhisper">本地 Whisper</h3><button class="btn sm stt-test-btn" data-backend="whisper" type="button" data-i18n="cfgTestConn">测试连接</button></div>
+            <div class="cfg-section-body">
+              <div class="form-row"><label data-i18n="cfgWhisperUrl">服务 URL</label><input id="sttWhisperUrl" placeholder="http://127.0.0.1:8086" /></div>
+              <div class="form-grid-2">
+                <div class="form-row"><label data-i18n="cfgModelOptional">模型（可选）</label><input id="sttWhisperModel" /></div>
+                <div class="form-row"><label data-i18n="cfgTimeout">超时（秒）</label><input type="number" id="sttWhisperTimeout" min="30" max="600" value="120" /></div>
+              </div>
+              <div class="test-result stt-test-result" hidden></div>
+            </div>
+          </div>
+          <div class="cfg-section stt-form" id="sttFormCloud" data-backend="cloud">
+            <div class="cfg-section-head"><h3 data-i18n="cfgSttCloud">云端 STT</h3><button class="btn sm stt-test-btn" data-backend="cloud" type="button" data-i18n="cfgTestStt">测试转录</button></div>
+            <div class="cfg-section-body">
+              <div class="form-grid-2">
+                <div class="form-row"><label data-i18n="cfgBaseUrl">Base URL</label><input id="sttCloudUrl" type="url" /></div>
+                <div class="form-row"><label data-i18n="cfgApiKey">API Key</label><input id="sttCloudKey" type="password" /><span class="form-note" data-i18n="cfgApiKeyNote">留空保留已保存的 Key</span></div>
+              </div>
+              <div class="form-row"><label data-i18n="cfgModel">模型</label><input id="sttCloudModel" list="sttModelList" /></div>
+              <datalist id="sttModelList"><option value="FunAudioLLM/SenseVoiceSmall"></option></datalist>
+              <div class="form-grid-2">
+                <div class="form-row"><label data-i18n="cfgTimeout">超时（秒）</label><input type="number" id="sttCloudTimeout" min="30" max="600" value="120" /></div>
+                <div class="form-row"><label data-i18n="cfgLangHint">语言提示（可选）</label><input id="sttCloudLang" placeholder="auto / en / zh" /></div>
+              </div>
+              <div class="test-result stt-test-result" hidden></div>
+            </div>
+          </div>
+          <div class="cfg-section stt-form" id="sttFormFunasr" data-backend="funasr" hidden>
+            <div class="cfg-section-head"><h3 data-i18n="cfgSttFunasr">Fun-ASR</h3><button class="btn sm stt-test-btn" data-backend="funasr" type="button" data-i18n="cfgTestStt">测试转录</button></div>
+            <div class="cfg-section-body">
+              <div class="form-grid-2">
+                <div class="form-row"><label data-i18n="cfgDashKey">DashScope API Key</label><input id="sttFunKey" type="password" /><span class="form-note" id="sttFunKeyNote" data-i18n="cfgApiKeyNote">留空保留已保存的 Key</span></div>
+                <div class="form-row"><label data-i18n="cfgModelOptional">模型（可选）</label><input id="sttFunModel" /></div>
+              </div>
+              <div class="form-grid-2">
+                <div class="form-row"><label>OSS Endpoint</label><input id="sttOssEndpoint" /></div>
+                <div class="form-row"><label>Bucket</label><input id="sttOssBucket" /></div>
+                <div class="form-row"><label>Access Key ID</label><input id="sttOssAk" /></div>
+                <div class="form-row"><label>Access Key Secret</label><input id="sttOssSk" type="password" /><span class="form-note" id="sttOssSkNote" data-i18n="cfgSecretNote">留空保留已保存的 Secret</span></div>
+              </div>
+              <div class="test-result stt-test-result" hidden></div>
+            </div>
+          </div>
         </div>
-        <div class="form-row">
-          <label for="cfgTemperature"><span data-i18n="cfgTemperature">Temperature</span> <span id="cfgTemperatureVal" class="form-val"></span></label>
-          <input type="range" id="cfgTemperature" min="0" max="2" step="0.05" />
+
+        <div id="cfgPanelProxy" hidden>
+          <p class="modal-hint" data-i18n="cfgProxyHint">直连失败或超时时，自动尝试下方代理（在线视频下载与元信息获取）。</p>
+          <div class="cfg-section">
+            <div class="cfg-section-head">
+              <h3 data-i18n="cfgProxyTitle">备用下载代理</h3>
+              <button class="btn sm" id="testProxyBtn" type="button" data-i18n="cfgTestProxy">测试代理</button>
+            </div>
+            <div class="cfg-section-body">
+              <label class="use-row cfg-check-row">
+                <input type="checkbox" id="cfgProxyEnabled" />
+                <div class="use-name" data-i18n="cfgProxyEnabled">启用备用代理</div>
+              </label>
+              <div class="form-row">
+                <label for="cfgProxyUrl" data-i18n="cfgProxyUrl">代理地址</label>
+                <input type="text" id="cfgProxyUrl" autocomplete="off" spellcheck="false" placeholder="socks5h://127.0.0.1:12080" />
+                <span class="form-note" data-i18n="cfgProxyUrlNote">支持 socks5 / socks5h / http / https</span>
+              </div>
+              <div class="test-result" id="cfgProxyResult" hidden></div>
+            </div>
+          </div>
         </div>
-        <div class="form-row">
-          <label for="cfgMaxTokens" data-i18n="cfgMaxTokens">Max tokens</label>
-          <input type="number" id="cfgMaxTokens" min="256" max="16384" step="256" />
-        </div>
-        <div class="form-row">
-          <label for="cfgBatchSize" data-i18n="cfgBatchSize">Batch size</label>
-          <input type="number" id="cfgBatchSize" min="1" max="32" step="1" />
-        </div>
-        <div class="form-meta" id="settingsMeta"></div>
       </div>
       <footer class="modal-foot">
-        <button class="btn" id="settingsReset" type="button" data-i18n="settingsReset">恢复默认</button>
+        <button class="btn" id="settingsReset" type="button" data-i18n="settingsReset">清空配置</button>
         <span class="modal-spacer"></span>
         <button class="btn" id="settingsCancel" type="button" data-i18n="settingsCancel">取消</button>
         <button class="btn primary" id="settingsSave" type="button" data-i18n="settingsSave">保存</button>

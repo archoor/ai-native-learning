@@ -10,6 +10,7 @@ const state = {
   jobId: "",
   status: "",
   srcLang: "",
+  title: "",
   duration: 0,
   segs: [],          // [{index,start,end,source,target}]
   llm: false,
@@ -22,6 +23,7 @@ const state = {
 };
 let es = null;
 let curIdx = -1;
+let lastSource = "";
 
 const video = $("video");
 
@@ -60,6 +62,67 @@ function showBanner(text, dotKind, pct) {
   $("bannerText").textContent = text;
   setStatusDot(dotKind);
   setProgressPct(pct == null ? null : pct);
+}
+
+function hideBanner() { $("banner").classList.remove("show"); }
+
+// ---------- 处理进度环（下载/转码） ----------
+const RING_CIRC = 2 * Math.PI * 52; // r=52 → 周长 ≈ 326.7
+const STEP_ORDER = ["dl", "tc", "tr", "mt"];
+
+function setRing(pct) {
+  const bar = $("ringBar");
+  const txt = $("ringPct");
+  const p = Math.max(0, Math.min(100, pct || 0));
+  if (bar) bar.style.strokeDashoffset = String(RING_CIRC * (1 - p / 100));
+  if (txt) txt.textContent = Math.round(p) + "%";
+}
+
+function setSteps(activeKey, doneKeys) {
+  const done = doneKeys || [];
+  document.querySelectorAll("#progSteps .step").forEach((s) => {
+    const k = s.dataset.step;
+    s.classList.toggle("active", k === activeKey);
+    s.classList.toggle("done", done.includes(k));
+  });
+  document.querySelectorAll("#progSteps .step-line").forEach((l, i) => {
+    l.classList.toggle("done", done.includes(STEP_ORDER[i]));
+  });
+}
+
+function showProcessing(stageText, subText, pct, activeKey, doneKeys) {
+  hideBanner();
+  setPlaceholder(false);
+  $("playerWrap").hidden = true;
+  const v = $("vprog");
+  v.hidden = false;
+  v.classList.add("show");
+  $("progStage").textContent = stageText;
+  $("progSub").textContent = subText || "";
+  setRing(pct);
+  setSteps(activeKey, doneKeys || []);
+}
+
+function hideProcessing() {
+  const v = $("vprog");
+  v.hidden = true;
+  v.classList.remove("show");
+}
+
+// ---------- 字幕生成进度条（转录/翻译并行） ----------
+function showSubtitleBar(label, pct, statHtml, done) {
+  const bar = $("subBar");
+  if (!bar) return;
+  bar.classList.add("show");
+  bar.classList.toggle("is-done", !!done);
+  $("subLabel").textContent = label || "";
+  $("subFill").style.width = Math.max(0, Math.min(100, pct || 0)) + "%";
+  $("subStat").innerHTML = statHtml || "";
+}
+
+function hideSubtitleBar() {
+  const bar = $("subBar");
+  if (bar) { bar.classList.remove("show"); bar.classList.remove("is-done"); }
 }
 
 function updateMeta() {
@@ -112,6 +175,7 @@ function startJobFromSnapshot(data) {
 
 async function submitJob(src) {
   resetForNewJob();
+  lastSource = src;
   showBanner(tr("submitting"), "active");
   $("loadBtn").disabled = true;
   try {
@@ -127,6 +191,7 @@ async function submitJob(src) {
       toast(msg, 4000);
       return;
     }
+    pushHistory(src, data.title || displayNameFromSource(src));
     startJobFromSnapshot(data);
   } catch (err) {
     showBanner(tr("submitFailed", { msg: err.message }), "error");
@@ -134,6 +199,142 @@ async function submitJob(src) {
     $("loadBtn").disabled = false;
   }
 }
+
+// ---------- 历史视频（最近 10 个，按打开时间倒序，持久化到后端）----------
+const HISTORY_KEY = "anl_history"; // 旧版 localStorage，仅用于一次性迁移
+const HISTORY_MAX = 10;
+let historyCache = [];
+
+function displayNameFromSource(src) {
+  if (/^https?:\/\//i.test(src)) return src;
+  return src.split(/[\\/]/).pop() || src;
+}
+
+async function fetchHistory() {
+  try {
+    const res = await fetch("/api/history");
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.items)) {
+      historyCache = data.items.slice(0, HISTORY_MAX);
+      return historyCache;
+    }
+  } catch {}
+  return historyCache;
+}
+
+/** 将旧版 localStorage 历史迁移到后端（仅在后端为空时执行一次）。 */
+async function migrateHistoryFromLocalStorage() {
+  let legacy = [];
+  try {
+    legacy = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    if (!Array.isArray(legacy)) legacy = [];
+  } catch { legacy = []; }
+  if (!legacy.length) return;
+
+  const current = await fetchHistory();
+  if (current.length) {
+    localStorage.removeItem(HISTORY_KEY);
+    return;
+  }
+
+  const sorted = legacy
+    .filter((x) => x && x.source)
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  for (const it of sorted) {
+    await pushHistory(it.source, it.name, { silent: true });
+  }
+  localStorage.removeItem(HISTORY_KEY);
+}
+
+/** 按 source 去重前插，名称以最新为准；上限 HISTORY_MAX。 */
+async function pushHistory(source, name, opts = {}) {
+  if (!source) return;
+  try {
+    const res = await fetch("/api/history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source,
+        name: name || displayNameFromSource(source),
+      }),
+    });
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.items)) {
+      historyCache = data.items.slice(0, HISTORY_MAX);
+    }
+  } catch {}
+  if (!opts.silent && !$("historyPanel").hidden) renderHistoryPanel();
+}
+
+async function removeHistory(source) {
+  try {
+    const res = await fetch("/api/history/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.items)) {
+      historyCache = data.items.slice(0, HISTORY_MAX);
+    }
+  } catch {}
+  renderHistoryPanel();
+}
+
+function renderHistoryPanel() {
+  const panel = $("historyPanel");
+  if (!panel) return;
+  const list = historyCache.slice().sort((a, b) => (b.opened_at || 0) - (a.opened_at || 0));
+  if (!list.length) {
+    panel.innerHTML = `<div class="history-empty">${tr("historyEmpty")}</div>`;
+    return;
+  }
+  panel.innerHTML = list.map((it) => {
+    const isUrl = /^https?:\/\//i.test(it.source);
+    const name = escapeHtml(it.name || it.source);
+    return `<div class="history-item" data-src="${escapeHtml(it.source)}" title="${escapeHtml(it.source)}">`
+      + `<span class="hi-icon">${isUrl ? "🔗" : "🎬"}</span>`
+      + `<span class="hi-name">${name}</span>`
+      + `<button class="hi-del" type="button" data-del="${escapeHtml(it.source)}" title="${escapeHtml(tr("historyRemove"))}">✕</button>`
+      + `</div>`;
+  }).join("");
+
+  panel.querySelectorAll(".history-item").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".hi-del")) return;
+      const src = el.dataset.src;
+      closeHistoryPanel();
+      $("urlInput").value = src;
+      submitJob(src);
+    });
+  });
+  panel.querySelectorAll(".hi-del").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeHistory(btn.dataset.del);
+    });
+  });
+}
+
+async function openHistoryPanel() {
+  await fetchHistory();
+  renderHistoryPanel();
+  $("historyPanel").hidden = false;
+  $("historyBtn").setAttribute("aria-expanded", "true");
+}
+function closeHistoryPanel() {
+  const p = $("historyPanel");
+  if (p) p.hidden = true;
+  $("historyBtn").setAttribute("aria-expanded", "false");
+}
+function toggleHistoryPanel() {
+  if ($("historyPanel").hidden) openHistoryPanel(); else closeHistoryPanel();
+}
+
+$("historyBtn").addEventListener("click", (e) => { e.stopPropagation(); toggleHistoryPanel(); });
+document.addEventListener("click", (e) => {
+  if (!$("historyPanel").hidden && !e.target.closest(".history-wrap")) closeHistoryPanel();
+});
 
 /** 从响应里提取可读错误：优先自定义 error，其次 Pydantic detail，最后状态文本。 */
 function errMsg(data, res) {
@@ -179,6 +380,10 @@ function resetForNewJob() {
     translate: { done: 0, total: 0 },
   };
   curIdx = -1;
+  state.title = "";
+  setNowPlaying("");
+  hideProcessing();
+  hideSubtitleBar();
   $("playerWrap").hidden = true;
   setPlaceholder(true);
   $("capSource").textContent = "";
@@ -192,11 +397,26 @@ function applySnapshot(data) {
   state.status = data.status;
   state.srcLang = data.src_lang || "";
   state.duration = data.duration || 0;
-  if (Array.isArray(data.segments)) state.segs = data.segments.slice();
+  if (data.title) {
+    state.title = data.title;
+    setNowPlaying(data.title);
+    if (lastSource) pushHistory(lastSource, data.title);
+  }
+  if (Array.isArray(data.segments)) {
+    state.segs = data.segments.slice();
+    syncProgressFromSegments();
+  }
   if (data.video_url) setVideoSource(data.video_url);
   renderStatus();
   updateMeta();
   notifyLearningPanel();
+}
+
+function setNowPlaying(name) {
+  const el = $("nowPlaying");
+  if (!el) return;
+  el.textContent = name || "";
+  el.title = name || "";
 }
 
 function notifyLearningPanel() {
@@ -229,6 +449,11 @@ function handleEvent(msg) {
       break;
     case "ready":
       state.duration = msg.duration || state.duration;
+      if (msg.title) {
+        state.title = msg.title;
+        setNowPlaying(msg.title);
+        if (lastSource) pushHistory(lastSource, msg.title);
+      }
       if (msg.video_url) setVideoSource(msg.video_url);
       renderStatus();
       updateMeta();
@@ -242,6 +467,7 @@ function handleEvent(msg) {
         index: i, start: msg.start, end: msg.end,
         source: msg.source || "", target: (state.segs[i] && state.segs[i].target) || "",
       };
+      syncProgressFromSegments();
       renderStatus();
       updateMeta();
       refreshCaption();
@@ -251,8 +477,10 @@ function handleEvent(msg) {
     case "translated": {
       const i = msg.index;
       if (state.segs[i]) state.segs[i].target = msg.target || "";
+      syncProgressFromSegments();
       renderStatus();
       refreshCaption();
+      notifyLearningPanel();
       break;
     }
     case "progress":
@@ -279,15 +507,30 @@ function setVideoSource(url) {
   setPlaceholder(false);
   if (video.getAttribute("src") === url) {
     $("playerWrap").hidden = false;
+    forceFirstFrame();
     return;
   }
   video.src = url;
+  pendingFirstFrame = true; // 新源：待解码并绘制首帧
   video.load();
   $("playerWrap").hidden = false;
 }
 
 function transcribedCount() { return state.segs.filter((s) => s && s.source).length; }
 function translatedCount() { return state.segs.filter((s) => s && s.target).length; }
+
+/** 续接/快照回放时，用已有字幕段回填 progress，避免缺 total 误显示「分析音频」。 */
+function syncProgressFromSegments() {
+  const nTotal = transcribedCount();
+  if (!nTotal) return;
+  const nDone = translatedCount();
+  if (!state.progress.transcribe.total) {
+    state.progress.transcribe = { done: nTotal, total: nTotal };
+  }
+  if (!state.progress.translate.total) {
+    state.progress.translate = { done: nDone, total: nTotal };
+  }
+}
 
 function pctOf(done, total) { return total ? Math.round((done / total) * 100) : 0; }
 
@@ -302,52 +545,75 @@ function readySeconds() {
   return end;
 }
 
+let doneHideTimer = null;
 function renderStatus() {
   const p = state.progress;
+  if (doneHideTimer) { clearTimeout(doneHideTimer); doneHideTimer = null; }
   switch (state.status) {
     case "queued":
-      showBanner(tr("statusQueued"), "active");
+      showProcessing(tr("progQueued"), tr("progQueuedSub"), 0, null, []);
       break;
     case "downloading":
-      showBanner(tr("statusDownloading", { pct: Math.round(p.download) }), "active", p.download);
+      showProcessing(tr("progDownload"), tr("progDownloadSub"), p.download, "dl", []);
       break;
     case "transcoding":
-      showBanner(tr("statusTranscoding", { pct: Math.round(p.transcode) }), "active", p.transcode);
+      showProcessing(tr("progTranscode"), tr("progTranscodeSub"), p.transcode, "tc", ["dl"]);
       break;
     case "ready":
-      showBanner(tr("statusReady"), "active");
+      hideProcessing();
+      hideBanner();
+      showSubtitleBar(tr("progReadyPrep"), 0, "", false);
       break;
-    // 转录与翻译并行：统一展示「正在处理字幕」组合进度
+    // 转录与翻译并行：视频已可播放，进度移到视频卡顶部细条
     case "transcribing":
     case "translating": {
-      const t = p.transcribe;
-      if (!t.total) {
-        showBanner(tr("statusTranscribingInit"), "active");
-        break;
-      }
+      hideProcessing();
+      hideBanner();
+      syncProgressFromSegments();
+      const t = state.progress.transcribe;
       const nTotal = transcribedCount();
       const nDone = translatedCount();
+      const tTotal = t.total || nTotal;
+      const tDone = t.total ? t.done : nTotal;
+      // 仅「转录刚开始、尚无分段」时显示分析音频
+      if (state.status === "transcribing" && !tTotal && nTotal === 0) {
+        showSubtitleBar(tr("statusTranscribingInit"), 0, "", false);
+        break;
+      }
       const readySec = readySeconds();
-      const readyMin = (readySec / 60).toFixed(1);
-      // 进度条以「已就绪时长 / 总时长」为准，最贴合“能看多少”
       const pct = state.duration
         ? Math.round((readySec / state.duration) * 100)
-        : pctOf(nDone, nTotal);
-      showBanner(
-        tr("statusSubtitle", { tDone: t.done, tTotal: t.total, nDone, nTotal, readyMin }),
-        "active",
+        : pctOf(nDone, nTotal || tTotal);
+      showSubtitleBar(
+        tr("subGenerating"),
         pct,
+        tr("subStat", {
+          tDone: tDone,
+          tTotal: tTotal || nTotal,
+          nDone,
+          nTotal: nTotal || tTotal,
+        }),
+        false,
       );
       break;
     }
     case "done":
-      showBanner(tr("statusDone", { n: state.segs.length }), "done");
+      hideProcessing();
+      hideBanner();
+      showSubtitleBar(
+        tr("subReady"),
+        100,
+        `<span class="check">${tr("subDoneStat", { n: state.segs.length })}</span>`,
+        true,
+      );
+      doneHideTimer = setTimeout(hideSubtitleBar, 3500);
       break;
     case "error":
+      hideProcessing();
       setStatusDot("error");
       break;
     default:
-      // 其他阶段兜底：正在进行 {phase}，进度 {pct}%
+      // 其他阶段兜底：用顶栏 banner 显示
       showBanner(tr("statusGeneric", { phase: state.status || "", pct: 0 }), "active");
       break;
   }
@@ -397,6 +663,21 @@ function refreshCaption(force) {
 video.addEventListener("timeupdate", () => refreshCaption());
 video.addEventListener("seeked", () => refreshCaption(true));
 
+// 首帧绘制：轻推 currentTime 强制 Chromium 解码并绘制第一帧，避免黑屏。
+// 用一次性标志 + 多事件兜底（冷启动转码完成后 loadeddata 可能早于 seekable，单一事件不可靠）。
+let pendingFirstFrame = false;
+function forceFirstFrame() {
+  if (!pendingFirstFrame) return;
+  if (video.readyState < 1) return;          // 元数据未就绪，等下个事件
+  if (!video.paused) { pendingFirstFrame = false; return; } // 已在播放，无需推
+  if (video.currentTime < 0.05) {
+    try { video.currentTime = 0.08; } catch (_) { return; } // 失败保留标志，等下个事件重试
+  }
+  pendingFirstFrame = false;
+}
+video.addEventListener("loadeddata", forceFirstFrame);
+video.addEventListener("canplay", forceFirstFrame);
+
 // ---------- 全屏（对 video-box 整体全屏，使叠加字幕同步显示）----------
 const videoBox = $("videoBox");
 function toggleFullscreen() {
@@ -440,7 +721,7 @@ function applyPlaybackRate() {
 }
 $("speed").onchange = applyPlaybackRate;
 // 切换视频源时浏览器会把 playbackRate 重置为 1，需重新应用所选倍速
-video.addEventListener("loadedmetadata", applyPlaybackRate);
+video.addEventListener("loadedmetadata", () => { applyPlaybackRate(); forceFirstFrame(); });
 video.addEventListener("ratechange", () => {
   const cur = String(video.playbackRate);
   if ([...$("speed").options].some((o) => o.value === cur)) $("speed").value = cur;
@@ -459,60 +740,249 @@ $("langBtn").onclick = () => {
   refreshCaption(true);
 };
 
-// ---------- 翻译设置 ----------
-let translateConfig = null;
+// ---------- 模型配置 ----------
+let modelsConfig = null;
+
+const CFG_TASKS = [
+  { id: "translate", hint: "字幕翻译" },
+  { id: "outline", hint: "骨架 / 信息地图" },
+  { id: "highlight", hint: "主题高亮" },
+  { id: "quiz", hint: "自测出题" },
+  { id: "grade", hint: "答案批改" },
+  { id: "feynman", hint: "费曼学习" },
+  { id: "report", hint: "学习报告" },
+];
+const STT_BACKENDS = ["whisper", "cloud", "funasr"];
+const STT_LABELS = { whisper: "本地 Whisper", cloud: "云端 STT", funasr: "Fun-ASR" };
+const SAVED_SECRET_MASK = "••••••••••••••••";
+const SECRET_INPUT_IDS = ["cfgApiKey", "sttCloudKey", "sttFunKey", "sttOssSk"];
+
+function fillSecretField(input, configured, hint) {
+  if (!input) return;
+  input.dataset.saved = configured ? "1" : "0";
+  if (configured) {
+    input.value = SAVED_SECRET_MASK;
+    input.placeholder = hint ? `${tr("cfgKeySaved")} ${hint}` : tr("cfgKeySaved");
+  } else {
+    input.value = "";
+    input.placeholder = tr("cfgApiKeyPlaceholder");
+  }
+}
+
+function readSecretField(input) {
+  if (!input) return "";
+  const v = input.value.trim();
+  if (!v) return "";
+  if (input.dataset.saved === "1" && v === SAVED_SECRET_MASK) return "";
+  return v;
+}
+
+function bindSecretFields() {
+  SECRET_INPUT_IDS.forEach((id) => {
+    const input = $(id);
+    if (!input || input.dataset.secretBound) return;
+    input.dataset.secretBound = "1";
+    input.addEventListener("focus", () => {
+      if (input.dataset.saved === "1" && input.value === SAVED_SECRET_MASK) {
+        input.value = "";
+        input.dataset.saved = "0";
+        input.placeholder = tr("cfgApiKeyPlaceholder");
+      }
+    });
+  });
+}
+
+function showTestResult(el, ok, msg) {
+  if (!el) return;
+  el.hidden = false;
+  el.className = "test-result " + (ok ? "ok" : "err");
+  el.textContent = msg;
+}
+
+function renderTaskList(tasks) {
+  const el = $("cfgTaskList");
+  if (!el) return;
+  el.innerHTML = CFG_TASKS.map((t) => {
+    const model = (tasks[t.id] && tasks[t.id].model) || "";
+    return `<div class="task-row" data-task="${t.id}">`
+      + `<div class="task-name">${escapeHtml(t.hint)}</div>`
+      + `<input class="task-model" data-task="${t.id}" value="${escapeHtml(model)}" />`
+      + `<button class="btn sm task-test-btn" type="button" data-task="${t.id}">${escapeHtml(tr("cfgTestTask"))}</button>`
+      + `</div>`;
+  }).join("");
+}
+
+function renderSttUseList(stt) {
+  const el = $("sttUseList");
+  if (!el) return;
+  const active = stt.active || "";
+  const backends = stt.backends || {};
+  el.innerHTML = STT_BACKENDS.map((b) => {
+    const ready = !!backends[b];
+    const checked = active === b ? "checked" : "";
+    const disabled = ready ? "" : "disabled";
+    const cls = ready ? "use-row" : "use-row disabled";
+    const pill = ready ? `<span class="cfg-pill ok">${tr("cfgReady")}</span>` : `<span class="cfg-pill">${tr("cfgNotReady")}</span>`;
+    return `<label class="${cls}" data-backend="${b}">`
+      + `<input type="radio" name="sttActive" value="${b}" ${checked} ${disabled ? "disabled" : ""} />`
+      + `<div class="use-name">${STT_LABELS[b]}</div>${pill}</label>`;
+  }).join("");
+}
+
+function updateStatusBars(r) {
+  const textBar = $("textStatusBar");
+  const textTxt = $("textStatusText");
+  if (textBar && textTxt) {
+    textBar.className = "cfg-status " + (r.text_ready ? "ok" : "warn");
+    textBar.querySelector(".cfg-dot").className = "cfg-dot " + (r.text_ready ? "ok" : "warn");
+    textTxt.textContent = r.text_ready ? tr("cfgTextReady") : tr("cfgTextNotReady");
+  }
+  const sttBar = $("sttStatusBar");
+  const sttTxt = $("sttStatusText");
+  if (sttBar && sttTxt) {
+    sttBar.className = "cfg-status " + (r.stt_ready ? "ok" : "warn");
+    sttBar.querySelector(".cfg-dot").className = "cfg-dot " + (r.stt_ready ? "ok" : "warn");
+    const label = STT_LABELS[r.stt_active] || "";
+    sttTxt.textContent = r.stt_ready ? tr("cfgSttReady", { name: label }) : tr("cfgSttNotReady");
+  }
+}
+
+function switchSttEdit(backend) {
+  $("sttEditTabs").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.backend === backend);
+  });
+  document.querySelectorAll(".stt-form").forEach((f) => {
+    f.hidden = f.dataset.backend !== backend;
+  });
+}
+
+function switchCfgTab(tab) {
+  $("cfgMainTabs").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
+  $("cfgPanelText").hidden = tab !== "text";
+  $("cfgPanelStt").hidden = tab !== "stt";
+  $("cfgPanelProxy").hidden = tab !== "proxy";
+}
+
+function fillSettings(cfg) {
+  modelsConfig = cfg;
+  const text = cfg.text || {};
+  const stt = cfg.stt || {};
+  $("cfgBaseUrl").value = text.base_url || "";
+  fillSecretField($("cfgApiKey"), text.api_key_configured, text.api_key_hint);
+  $("cfgTemperature").value = text.temperature ?? 0.3;
+  $("cfgTemperatureVal").textContent = Number(text.temperature ?? 0.3).toFixed(2);
+  $("cfgMaxTokens").value = text.max_tokens ?? 4096;
+  renderTaskList(text.tasks || {});
+
+  const w = stt.whisper || {};
+  $("sttWhisperUrl").value = w.base_url || "";
+  $("sttWhisperModel").value = w.model || "";
+  $("sttWhisperTimeout").value = w.timeout_sec ?? 120;
+  const c = stt.cloud || {};
+  $("sttCloudUrl").value = c.base_url || "";
+  fillSecretField($("sttCloudKey"), c.api_key_configured, c.api_key_hint);
+  $("sttCloudModel").value = c.model || "";
+  $("sttCloudTimeout").value = c.timeout_sec ?? 120;
+  $("sttCloudLang").value = c.language_hint || "";
+  const f = stt.funasr || {};
+  fillSecretField($("sttFunKey"), f.api_key_configured, f.api_key_hint);
+  $("sttFunModel").value = f.model || "";
+  $("sttOssEndpoint").value = f.oss_endpoint || "";
+  $("sttOssBucket").value = f.oss_bucket || "";
+  $("sttOssAk").value = f.oss_access_key_id || "";
+  fillSecretField($("sttOssSk"), f.oss_secret_configured, "");
+  const funKeyNote = $("sttFunKeyNote");
+  if (funKeyNote) funKeyNote.textContent = f.api_key_configured ? tr("cfgKeySaved") : tr("cfgApiKeyNote");
+  const ossSkNote = $("sttOssSkNote");
+  if (ossSkNote) ossSkNote.textContent = f.oss_secret_configured ? tr("cfgSecretSaved") : tr("cfgSecretNote");
+
+  const dp = cfg.download_proxy || {};
+  $("cfgProxyEnabled").checked = !!dp.enabled;
+  $("cfgProxyUrl").value = dp.url || "";
+
+  renderSttUseList(stt);
+  const editBackend = stt.active && STT_BACKENDS.includes(stt.active) ? stt.active : "cloud";
+  switchSttEdit(editBackend);
+  updateStatusBars(cfg.readiness || {});
+}
+
+function collectSettingsBody() {
+  const tasks = {};
+  document.querySelectorAll(".task-model").forEach((inp) => {
+    const id = inp.dataset.task;
+    const model = inp.value.trim();
+    if (model) tasks[id] = { model };
+  });
+  const activeEl = document.querySelector('input[name="sttActive"]:checked');
+  const stt = {
+    active: activeEl ? activeEl.value : "",
+    whisper: {
+      base_url: $("sttWhisperUrl").value.trim(),
+      model: $("sttWhisperModel").value.trim(),
+      timeout_sec: parseInt($("sttWhisperTimeout").value, 10) || 120,
+    },
+    cloud: {
+      base_url: $("sttCloudUrl").value.trim(),
+      api_key: readSecretField($("sttCloudKey")),
+      model: $("sttCloudModel").value.trim(),
+      timeout_sec: parseInt($("sttCloudTimeout").value, 10) || 120,
+      language_hint: $("sttCloudLang").value.trim(),
+    },
+    funasr: {
+      api_key: readSecretField($("sttFunKey")),
+      model: $("sttFunModel").value.trim(),
+      oss_endpoint: $("sttOssEndpoint").value.trim(),
+      oss_bucket: $("sttOssBucket").value.trim(),
+      oss_access_key_id: $("sttOssAk").value.trim(),
+      oss_access_key_secret: readSecretField($("sttOssSk")),
+    },
+  };
+  return {
+    text: {
+      base_url: $("cfgBaseUrl").value.trim(),
+      api_key: readSecretField($("cfgApiKey")),
+      temperature: parseFloat($("cfgTemperature").value),
+      max_tokens: parseInt($("cfgMaxTokens").value, 10),
+      tasks,
+    },
+    stt,
+    download_proxy: {
+      enabled: $("cfgProxyEnabled").checked,
+      url: $("cfgProxyUrl").value.trim(),
+    },
+  };
+}
 
 async function openSettings() {
   try {
-    const res = await fetch("/api/translate-config");
+    const res = await fetch("/api/models-config");
     const cfg = await res.json();
     if (!res.ok) throw new Error(cfg.error || res.statusText);
-    translateConfig = cfg;
     fillSettings(cfg);
+    switchCfgTab("text");
     $("settingsModal").hidden = false;
   } catch (e) {
     toast(e.message, 3500);
   }
 }
 
-function fillSettings(cfg) {
-  $("cfgBaseUrl").value = cfg.base_url || "";
-  $("cfgApiKey").value = "";
-  $("cfgModel").value = cfg.model || "";
-  $("cfgTemperature").value = cfg.temperature ?? 0.3;
-  $("cfgTemperatureVal").textContent = Number(cfg.temperature ?? 0.3).toFixed(2);
-  $("cfgMaxTokens").value = cfg.max_tokens ?? 4096;
-  $("cfgBatchSize").value = cfg.batch_size ?? 16;
-  const keyOk = cfg.api_key_configured;
-  $("settingsMeta").innerHTML = [
-    `Endpoint：<strong>${escapeHtml(cfg.base_url_host || "-")}</strong> (${escapeHtml(cfg.base_url_source || "-")})`,
-    `API Key：${keyOk ? `<span class="ok">已配置 ${escapeHtml(cfg.api_key_hint || "")}</span>` : `<span class="warn">未配置</span>`}`,
-    `翻译可用：${cfg.llm_available ? `<span class="ok">是</span>` : `<span class="warn">否</span>`}`,
-  ].join("<br>");
-}
-
 async function saveSettings() {
-  const body = {
-    base_url: $("cfgBaseUrl").value.trim(),
-    api_key: $("cfgApiKey").value.trim(),
-    model: $("cfgModel").value.trim(),
-    temperature: parseFloat($("cfgTemperature").value),
-    max_tokens: parseInt($("cfgMaxTokens").value, 10),
-    batch_size: parseInt($("cfgBatchSize").value, 10),
-  };
-  if (!body.model) { toast(tr("modelRequired")); return; }
-  if (!body.base_url) { toast(tr("baseUrlRequired")); return; }
-  if (!body.api_key && !translateConfig?.api_key_configured) { toast(tr("apiKeyRequired")); return; }
+  const body = collectSettingsBody();
+  if (!body.text.base_url) { toast(tr("baseUrlRequired")); return; }
+  if (!body.text.api_key && !modelsConfig?.text?.api_key_configured) { toast(tr("apiKeyRequired")); return; }
   try {
-    const res = await fetch("/api/translate-config", {
+    const res = await fetch("/api/models-config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!res.ok || data.error) { toast(tr("saveFailed", { msg: data.error || res.statusText }), 3500); return; }
-    translateConfig = data;
-    state.llm = data.llm_available;
+    modelsConfig = data;
+    state.llm = !!(data.readiness && data.readiness.translate_ready);
+    fillSettings(data);
     $("settingsModal").hidden = true;
     toast(tr("saveOk"));
   } catch (e) {
@@ -522,14 +992,127 @@ async function saveSettings() {
 
 async function resetSettings() {
   try {
-    const res = await fetch("/api/translate-config/reset", { method: "POST" });
+    const res = await fetch("/api/models-config/reset", { method: "POST" });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || res.statusText);
-    translateConfig = data;
+    modelsConfig = data;
+    state.llm = false;
     fillSettings(data);
     toast(tr("resetOk"));
   } catch (e) {
     toast(e.message, 3500);
+  }
+}
+
+async function testTextConn() {
+  try {
+    const saveRes = await fetch("/api/models-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectSettingsBody()),
+    });
+    const saved = await saveRes.json();
+    if (!saveRes.ok) throw new Error(saved.error || saveRes.statusText);
+    modelsConfig = saved;
+    const res = await fetch("/api/models-config/test/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: "translate" }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    showTestResult($("textConnResult"), true, tr("cfgTestOk"));
+    fillSettings(saved);
+  } catch (e) {
+    showTestResult($("textConnResult"), false, tr("cfgTestFail", { msg: e.message }));
+  }
+}
+
+async function testTextTask(task) {
+  try {
+    const saveRes = await fetch("/api/models-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectSettingsBody()),
+    });
+    const saved = await saveRes.json();
+    if (!saveRes.ok) throw new Error(saved.error || saveRes.statusText);
+    modelsConfig = saved;
+    const res = await fetch("/api/models-config/test/text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    toast(tr("cfgTestOk"));
+    fillSettings(saved);
+  } catch (e) {
+    toast(tr("cfgTestFail", { msg: e.message }), 4000);
+  }
+}
+
+async function testProxy() {
+  const body = collectSettingsBody();
+  try {
+    const saveRes = await fetch("/api/models-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const saved = await saveRes.json();
+    if (saveRes.ok) {
+      modelsConfig = saved;
+    }
+    const res = await fetch("/api/models-config/test/proxy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ download_proxy: body.download_proxy }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (saveRes.ok) fillSettings(saved);
+    showTestResult(
+      $("cfgProxyResult"),
+      true,
+      tr("cfgProxyTestOk", { code: data.status_code, ms: data.elapsed_ms }),
+    );
+  } catch (e) {
+    showTestResult($("cfgProxyResult"), false, tr("cfgTestFail", { msg: e.message }));
+  }
+}
+
+async function testSttBackend(backend) {
+  const body = collectSettingsBody();
+  const form = document.querySelector(`.stt-form[data-backend="${backend}"]`);
+  const resultEl = form && form.querySelector(".stt-test-result");
+  try {
+    const saveRes = await fetch("/api/models-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const saved = await saveRes.json();
+    if (saveRes.ok) {
+      modelsConfig = saved;
+    }
+    const res = await fetch("/api/models-config/test/stt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ backend, stt: body.stt }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (saveRes.ok) {
+      fillSettings(saved);
+    } else {
+      const cfgRes = await fetch("/api/models-config");
+      const cfg = await cfgRes.json();
+      if (cfgRes.ok) fillSettings(cfg);
+    }
+    showTestResult(resultEl, true, tr("cfgTestOk"));
+  } catch (e) {
+    showTestResult(resultEl, false, tr("cfgTestFail", { msg: e.message }));
   }
 }
 
@@ -538,7 +1121,24 @@ $("settingsClose").onclick = () => ($("settingsModal").hidden = true);
 $("settingsCancel").onclick = () => ($("settingsModal").hidden = true);
 $("settingsSave").onclick = saveSettings;
 $("settingsReset").onclick = resetSettings;
+$("testTextConn").onclick = testTextConn;
+$("testProxyBtn").onclick = testProxy;
 $("cfgTemperature").oninput = (e) => ($("cfgTemperatureVal").textContent = parseFloat(e.target.value).toFixed(2));
+$("cfgMainTabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tab]");
+  if (btn) switchCfgTab(btn.dataset.tab);
+});
+$("sttEditTabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-backend]");
+  if (btn) switchSttEdit(btn.dataset.backend);
+});
+$("cfgTaskList").addEventListener("click", (e) => {
+  const btn = e.target.closest(".task-test-btn");
+  if (btn) testTextTask(btn.dataset.task);
+});
+document.querySelectorAll(".stt-test-btn").forEach((btn) => {
+  btn.addEventListener("click", () => testSttBackend(btn.dataset.backend));
+});
 $("settingsModal").addEventListener("click", (e) => {
   if (e.target === e.currentTarget) $("settingsModal").hidden = true;
 });
@@ -580,11 +1180,14 @@ window.LearnBridge = {
 };
 
 (function init() {
+  bindSecretFields();
   const savedTheme = localStorage.getItem("vt_theme");
   if (savedTheme) document.body.dataset.theme = savedTheme;
   $("langBtn").textContent = I18n.getLocale() === "zh" ? "EN" : "中";
+  migrateHistoryFromLocalStorage().then(() => fetchHistory()).catch(() => {});
   fetch("/api/health").then((r) => r.json()).then((h) => {
     state.llm = !!h.llm;
     if (!h.stt) toast(tr("noStt"), 5000);
+    else if (!h.llm) toast(tr("noLlm"), 5000);
   }).catch(() => {});
 })();

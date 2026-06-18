@@ -116,15 +116,30 @@
     return m;
   }
 
+  // 三态视图：
+  //  - all : 显示完整转录稿，隐藏骨架与地图
+  //  - map : 隐藏转录稿，显示骨架+信息地图，并显示「生成骨架」按钮
+  //  - rel : 仅显示关联转录稿，隐藏骨架与地图
   function applyViewMode() {
-    const relOnly = panel.viewMode === "rel";
+    const mode = panel.viewMode;
+    const isMap = mode === "map";
+    const relOnly = mode === "rel";
+    // 转录稿区块（含小标题）：信息地图态整体隐藏
+    document.querySelectorAll(".transcript-only").forEach((el) => {
+      el.classList.toggle("hidden-seg", isMap);
+    });
+    // 仅关联：隐藏无关段
     document.querySelectorAll("#learnTranscript .learn-seg").forEach((el) => {
       const rel = parseInt(el.dataset.rel || "0", 10);
       el.classList.toggle("hidden-seg", relOnly && rel === 0);
     });
+    // 骨架 + 信息地图：仅信息地图态显示
     document.querySelectorAll(".outline-only").forEach((el) => {
-      el.classList.toggle("hidden-outline", relOnly);
+      el.classList.toggle("hidden-outline", !isMap);
     });
+    // 「生成骨架」按钮仅信息地图态显示
+    const btn = $("learnOutlineBtn");
+    if (btn) btn.style.display = isMap ? "" : "none";
   }
 
   function renderTranscript() {
@@ -693,5 +708,8 @@
   bindUi();
   applyLearnI18n();
   refreshVoiceStatus();
-  window.LearningPanel.setModelName("deepseek-v4-pro");
+  fetch("/api/models-config").then((r) => r.json()).then((cfg) => {
+    const m = cfg.text && cfg.text.tasks && cfg.text.tasks.outline && cfg.text.tasks.outline.model;
+    if (m) window.LearningPanel.setModelName(m);
+  }).catch(() => {});
 })();

@@ -101,6 +101,7 @@ function startBackend(port) {
     return spawn(bundled, ["--no-open", "--port", String(port)], {
       cwd: path.dirname(bundled),
       windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
     });
   }
   // 启动器/开发态：用 uv 运行源码后端
@@ -108,7 +109,12 @@ function startBackend(port) {
   return spawn(
     uvExe,
     ["run", "python", "ai_native_learning/run.py", "--no-open", "--port", String(port)],
-    { cwd: PROJECT_ROOT, shell: process.platform === "win32", windowsHide: true }
+    {
+      cwd: PROJECT_ROOT,
+      shell: process.platform === "win32",
+      windowsHide: true,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+    }
   );
 }
 
