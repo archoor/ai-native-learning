@@ -18,7 +18,9 @@ import sys
 from pathlib import Path
 
 _APP_DIR_NAME = "AiNativeLearning"
+_LEGACY_APP_DIR_NAME = "VideoTranslate"
 _env_loaded = False
+_user_data_cache: Path | None = None
 
 
 def is_frozen() -> bool:
@@ -47,14 +49,52 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _merge_tree(src: Path, dst: Path) -> None:
+    """
+    将旧目录内容合并到新目录（仅补缺，不覆盖）。
+    失败时静默降级，避免因权限/锁影响启动。
+    """
+    if not src.exists() or not src.is_dir():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        try:
+            if item.is_dir():
+                _merge_tree(item, target)
+            elif not target.exists():
+                item.replace(target)
+        except OSError:
+            continue
+
+
 def user_data_dir() -> Path:
+    global _user_data_cache
+    if _user_data_cache is not None:
+        return _user_data_cache
+
     if os.name == "nt":
         base = Path(os.getenv("APPDATA") or Path.home())
     else:
         base = Path(os.getenv("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-    d = base / _APP_DIR_NAME
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+
+    new_dir = base / _APP_DIR_NAME
+    legacy_dir = base / _LEGACY_APP_DIR_NAME
+
+    if legacy_dir.exists():
+        if not new_dir.exists():
+            # 优先原地迁移（快且不重复占用空间）；失败则直接复用旧目录。
+            try:
+                legacy_dir.replace(new_dir)
+            except OSError:
+                _user_data_cache = legacy_dir
+                return legacy_dir
+        else:
+            _merge_tree(legacy_dir, new_dir)
+
+    new_dir.mkdir(parents=True, exist_ok=True)
+    _user_data_cache = new_dir
+    return new_dir
 
 
 def media_dir() -> Path:

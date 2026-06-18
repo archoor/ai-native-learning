@@ -8,9 +8,15 @@ FastAPI 应用：托管前端 + AI原生学习流水线接口。
   GET  /api/job/{id}           读取 job 当前快照
   GET  /api/job/{id}/events    SSE：阶段 / 视频就绪 / 转录段 / 译文 / 完成
   GET  /api/video/{id}         以 HTTP Range 服务本地 mp4（供 <video> 拖动 seek）
-  GET  /api/translate-config   读取翻译参数（复用 subtitle_player）
-  PUT  /api/translate-config   保存翻译参数
-  POST /api/translate-config/reset 重置
+  GET  /api/models-config         读取模型配置
+  PUT  /api/models-config         保存模型配置
+  POST /api/models-config/reset   清空配置
+  POST /api/models-config/test/text  测试文本模型
+  POST /api/models-config/test/stt   测试转录模型
+  POST /api/models-config/test/proxy 测试备用下载代理
+  GET  /api/history            最近打开的视频（最多 10 条）
+  POST /api/history            记录打开视频
+  POST /api/history/remove     从历史中移除
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 # 注入仓库根，确保可 import scripts.* 与 subtitle_player.*
 _ROOT = Path(__file__).resolve().parents[2]
@@ -30,19 +37,10 @@ from fastapi import FastAPI, File, Request, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from subtitle_player.backend import translator  # noqa: E402
-from subtitle_player.backend.translate_config import (  # noqa: E402
-    get_config_public,
-    reset_user_config,
-    save_user_config,
-)
-
-from . import jobs, pipeline  # noqa: E402
+from . import history, jobs, model_config, pipeline  # noqa: E402
 from .learning.routes import router as learn_router  # noqa: E402
 from .live_transcribe import cloud_stt_available  # noqa: E402
-from .paths import frontend_dir, load_env, media_dir  # noqa: E402
-
-load_env()
+from .paths import frontend_dir, media_dir  # noqa: E402
 
 _FRONTEND = frontend_dir()
 # 可处理的本地视频/音频扩展名
@@ -64,24 +62,46 @@ class JobBody(BaseModel):
         return (self.source or self.url).strip().strip('"').strip("'")
 
 
-class TranslateConfigBody(BaseModel):
-    model: str = Field(..., min_length=1)
-    base_url: str = Field("", description="OpenAI 兼容 API Base URL")
-    api_key: str = Field("", description="API Key；留空保留已保存值")
-    temperature: float = Field(0.3, ge=0.0, le=2.0)
-    max_tokens: int = Field(4096, ge=256, le=16384)
-    batch_size: int = Field(16, ge=1, le=32)
+class ModelsConfigBody(BaseModel):
+    text: dict[str, Any] | None = None
+    stt: dict[str, Any] | None = None
+    download_proxy: dict[str, Any] | None = None
+
+
+class TestTextBody(BaseModel):
+    task: str = Field("translate", description="任务 key")
+
+
+class TestSttBody(BaseModel):
+    backend: str = Field("", description="whisper|cloud|funasr，空则测当前使用")
+    stt: dict[str, Any] | None = None
+
+
+class TestProxyBody(BaseModel):
+    download_proxy: dict[str, Any] | None = None
+
+
+class HistoryBody(BaseModel):
+    source: str = Field(..., min_length=1)
+    name: str = Field("")
 
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "llm": translator.llm_available(), "stt": cloud_stt_available()}
+    r = model_config.readiness()
+    return {
+        "ok": True,
+        "llm": r.get("translate_ready", False),
+        "learn_llm": r.get("learn_ready", False),
+        "stt": r.get("stt_ready", False),
+        "readiness": r,
+    }
 
 
 def _stt_guard() -> JSONResponse | None:
     if not cloud_stt_available():
         return JSONResponse(
-            {"error": "未配置云端 STT（BASE_URL / API_KEY）。请在 .env 中配置后重试。"},
+            {"error": "未配置转录模型。请在设置中选择当前方案并完成配置。"},
             status_code=422,
         )
     return None
@@ -194,24 +214,78 @@ def serve_video(job_id: str, request: Request) -> Response:
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
-@app.get("/api/translate-config")
-def get_translate_config() -> dict:
-    return get_config_public()
+@app.get("/api/models-config")
+def get_models_config() -> dict:
+    return model_config.get_public()
 
 
-@app.put("/api/translate-config")
-def put_translate_config(body: TranslateConfigBody) -> dict:
+@app.put("/api/models-config", response_model=None)
+def put_models_config(body: ModelsConfigBody) -> JSONResponse | dict:
+    payload: dict[str, Any] = {}
+    if body.text is not None:
+        payload["text"] = body.text
+    if body.stt is not None:
+        payload["stt"] = body.stt
+    if body.download_proxy is not None:
+        payload["download_proxy"] = body.download_proxy
     try:
-        save_user_config(body.model_dump())
+        return model_config.save_config(payload)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
-    return get_config_public()
 
 
-@app.post("/api/translate-config/reset")
-def post_translate_config_reset() -> dict:
-    reset_user_config()
-    return get_config_public()
+@app.post("/api/models-config/reset")
+def post_models_config_reset() -> dict:
+    model_config.reset_config()
+    return model_config.get_public()
+
+
+@app.post("/api/models-config/test/text", response_model=None)
+def post_test_text(body: TestTextBody) -> JSONResponse | dict:
+    try:
+        return model_config.test_text(body.task)
+    except model_config.ConfigError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.post("/api/models-config/test/stt", response_model=None)
+def post_test_stt(body: TestSttBody) -> JSONResponse | dict:
+    backend = body.backend.strip() or None
+    try:
+        return model_config.test_stt(backend, stt_draft=body.stt)
+    except model_config.ConfigError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.post("/api/models-config/test/proxy", response_model=None)
+def post_test_proxy(body: TestProxyBody) -> JSONResponse | dict:
+    try:
+        return model_config.test_download_proxy(body.download_proxy)
+    except model_config.ConfigError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.get("/api/history")
+def get_history() -> dict:
+    return {"items": history.list_history()}
+
+
+@app.post("/api/history")
+def post_history(body: HistoryBody) -> dict:
+    items = history.push_history(body.source, body.name)
+    return {"items": items}
+
+
+@app.post("/api/history/remove")
+def post_history_remove(body: HistoryBody) -> dict:
+    items = history.remove_history(body.source)
+    return {"items": items}
 
 
 def _sse(obj: dict) -> str:

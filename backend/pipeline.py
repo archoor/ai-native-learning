@@ -45,6 +45,7 @@ from subtitle_player.backend.parser import detect_lang  # noqa: E402
 from . import store  # noqa: E402
 from .jobs import Job, load_result, save_result  # noqa: E402
 from .live_transcribe import transcribe_segments  # noqa: E402
+from .model_config import get_download_fallback_proxy  # noqa: E402
 from .paths import media_dir  # noqa: E402
 
 # 翻译攒批：达到该条数或空闲超过 flush 间隔即翻一批（兼顾质量与实时性）
@@ -88,6 +89,7 @@ def _prepare_media(job: Job, out_file: Path) -> Path:
         _set_status(job, "downloading")
         return download_and_transcode(
             job.url, media_dir(), output_file=out_file,
+            fallback_proxy=get_download_fallback_proxy(),
             on_download_progress=_on_dl,
             on_transcode_progress=_on_tc,
         )
@@ -148,20 +150,21 @@ def _translate_worker(
     state: dict,
 ) -> None:
     """消费翻译队列：攒批 → LLM 翻译 → 推 translated 事件 + 追加 trans.jsonl。"""
-    cfg = translator._get_llm_config()
-    if cfg is None:
+    try:
+        from .model_config import require_text
+        params = require_text("translate")
+    except Exception as e:
         job.emit({
             "type": "error",
-            "message": "未配置翻译 API。请在设置面板填写 Base URL 与 API Key，或在 .env 中配置。",
+            "message": f"未配置字幕翻译模型：{e}",
         })
-        # 仍需排空队列，避免转录线程阻塞
         while q.get() is not _SENTINEL:
             pass
         return
 
-    _model, base_url, api_key = cfg
-    params = translator.get_effective_params()
     model = params.model
+    base_url = params.base_url
+    api_key = params.api_key
 
     batch: list[int] = []
 
@@ -250,6 +253,18 @@ def _resume_from_store(job: Job, video_path: Path, progress: dict) -> float:
 
     job.segments = committed
 
+    n = len(committed)
+    if n:
+        trans_done = sum(1 for s in committed if s.get("target"))
+        job.emit({
+            "type": "progress", "phase": "transcribe",
+            "done": n, "total": n,
+        })
+        job.emit({
+            "type": "progress", "phase": "translate",
+            "done": trans_done, "total": n,
+        })
+
     _set_status(job, "ready")
     job.emit({
         "type": "ready",
@@ -317,6 +332,18 @@ def _run_parallel(
 
         store.save_progress(job.id, transcribe_complete=True)
 
+    # 续接且转录已完成：补发进度，避免前端误显示「分析音频」
+    if transcribe_complete and job.segments:
+        trans_done = sum(1 for s in job.segments if s.get("target"))
+        job.emit({
+            "type": "progress", "phase": "transcribe",
+            "done": len(job.segments), "total": len(job.segments),
+        })
+        job.emit({
+            "type": "progress", "phase": "translate",
+            "done": trans_done, "total": len(job.segments),
+        })
+
     # 结束转录 → 通知翻译线程收尾
     q.put(_SENTINEL)
     if job.segments:
@@ -342,7 +369,7 @@ def _derive_title(job: Job) -> str:
         return job.title
     if job.source_type == "url":
         try:
-            title, vid = _fetch_video_meta(job.url)
+            title, vid = _fetch_video_meta(job.url, fallback_proxy=get_download_fallback_proxy())
             if title or vid:
                 return title or vid  # type: ignore[return-value]
         except Exception:

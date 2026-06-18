@@ -22,6 +22,19 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 
+def _configure_stdio_utf8() -> None:
+    """Windows 下将 stdout/stderr 设为 UTF-8，避免 yt-dlp 等输出触发 GBK 编码错误。"""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def _silence_proactor_connection_reset() -> None:
     """
     抑制 Windows asyncio Proactor 在客户端中断连接时抛出的无害异常。
@@ -65,6 +78,7 @@ def main() -> int:
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     args = ap.parse_args()
 
+    _configure_stdio_utf8()
     import uvicorn
 
     _silence_proactor_connection_reset()

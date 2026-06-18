@@ -1,34 +1,34 @@
-"""学习工具 LLM 封装：复用 .env 中 SUMMARY_* 配置（deepseek-v4-pro）。"""
+"""学习工具 LLM 封装：按任务读取 model_config。"""
 
 from __future__ import annotations
 
 import json
 import re
-import sys
-from pathlib import Path
 from typing import Any
 
-_ROOT = Path(__file__).resolve().parents[3]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-from scripts.lib.transcript_common import get_llm_config  # noqa: E402
+from ..model_config import ConfigError, TextProfile, require_text, text_task_ready
 
 MAX_INPUT_CHARS = 80_000
 
 
 def llm_available() -> bool:
-    return get_llm_config() is not None
+    return text_task_ready("outline")
 
 
-def _client():
-    cfg = get_llm_config()
-    if cfg is None:
-        raise RuntimeError("未配置 LLM（SUMMARY_BASE_URL / SUMMARY_API_KEY / SUMMARY_MODEL）")
-    model, base_url, api_key = cfg
+def task_available(task: str) -> bool:
+    return text_task_ready(task)
+
+
+def _client(profile: TextProfile):
     from openai import OpenAI
 
-    return OpenAI(base_url=base_url, api_key=api_key), model
+    http_client = None
+    try:
+        import httpx
+        http_client = httpx.Client(trust_env=False, timeout=120.0)
+    except Exception:
+        pass
+    return OpenAI(base_url=profile.base_url, api_key=profile.api_key, http_client=http_client)
 
 
 def _extract_json(text: str) -> Any:
@@ -39,18 +39,26 @@ def _extract_json(text: str) -> Any:
     return json.loads(text)
 
 
-def chat_json(system: str, user: str, *, temperature: float = 0.3) -> Any:
-    """调用 LLM 并解析 JSON 响应。"""
-    client, model = _client()
+def chat_json(
+    system: str,
+    user: str,
+    *,
+    task: str = "outline",
+    temperature: float | None = None,
+) -> Any:
+    profile = require_text(task)
+    client = _client(profile)
     if len(user) > MAX_INPUT_CHARS:
         user = user[:MAX_INPUT_CHARS] + "\n\n[…下文已截断…]"
+    temp = profile.temperature if temperature is None else temperature
     resp = client.chat.completions.create(
-        model=model,
+        model=profile.model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=temperature,
+        temperature=temp,
+        max_tokens=profile.max_tokens,
         response_format={"type": "json_object"},
     )
     content = (resp.choices[0].message.content or "").strip()
@@ -59,15 +67,24 @@ def chat_json(system: str, user: str, *, temperature: float = 0.3) -> Any:
     return _extract_json(content)
 
 
-def chat_text(system: str, user: str, *, temperature: float = 0.3) -> str:
-    client, model = _client()
+def chat_text(
+    system: str,
+    user: str,
+    *,
+    task: str = "report",
+    temperature: float | None = None,
+) -> str:
+    profile = require_text(task)
+    client = _client(profile)
+    temp = profile.temperature if temperature is None else temperature
     resp = client.chat.completions.create(
-        model=model,
+        model=profile.model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=temperature,
+        temperature=temp,
+        max_tokens=profile.max_tokens,
     )
     return (resp.choices[0].message.content or "").strip()
 
@@ -76,13 +93,20 @@ def chat_messages(
     system: str,
     messages: list[dict[str, str]],
     *,
-    temperature: float = 0.4,
+    task: str = "grade",
+    temperature: float | None = None,
     json_mode: bool = False,
 ) -> str | Any:
-    """多轮对话；json_mode=True 时解析 JSON。"""
-    client, model = _client()
+    profile = require_text(task)
+    client = _client(profile)
     full = [{"role": "system", "content": system}, *messages]
-    kwargs: dict[str, Any] = {"model": model, "messages": full, "temperature": temperature}
+    temp = profile.temperature if temperature is None else temperature
+    kwargs: dict[str, Any] = {
+        "model": profile.model,
+        "messages": full,
+        "temperature": temp,
+        "max_tokens": profile.max_tokens,
+    }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     resp = client.chat.completions.create(**kwargs)

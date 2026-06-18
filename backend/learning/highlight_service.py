@@ -15,7 +15,7 @@ MAX_PARALLEL = 3
 def _highlight_batch(goal: str, batch: list[dict]) -> list[dict]:
     transcript = prompts.format_segments_for_llm(batch)
     user = f"学习目标：{goal}\n\n<transcript>\n{transcript}\n</transcript>"
-    result = llm_service.chat_json(prompts.HIGHLIGHT_SYSTEM, user, temperature=0.2)
+    result = llm_service.chat_json(prompts.HIGHLIGHT_SYSTEM, user, task="highlight", temperature=0.2)
     return result.get("segments") or []
 
 

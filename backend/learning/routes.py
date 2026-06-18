@@ -17,6 +17,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from .. import jobs  # noqa: E402
+from ..model_config import readiness as models_readiness  # noqa: E402
 from ..live_transcribe import cloud_stt_available  # noqa: E402
 from . import kb_writer  # noqa: E402
 from . import highlight_service, llm_service, prompts, voice_stt  # noqa: E402
@@ -72,14 +73,23 @@ def _job_segments(job_id: str) -> tuple[Any, list[dict] | JSONResponse]:
     return job, segs
 
 
+def _llm_guard(task: str) -> JSONResponse | None:
+    if not llm_service.task_available(task):
+        return JSONResponse({"error": "请在设置中配置文本模型"}, status_code=422)
+    return None
+
+
 @router.get("/health")
 def learn_health() -> dict:
     vs = voice_stt.voice_status()
+    r = models_readiness()
     return {
         "ok": True,
-        "llm": llm_service.llm_available(),
+        "llm": r.get("learn_ready", False),
+        "translate_ready": r.get("translate_ready", False),
         "stt": cloud_stt_available(),
         "voice": vs,
+        "readiness": r,
     }
 
 
@@ -98,8 +108,9 @@ def get_session(job_id: str) -> dict:
 
 @router.post("/{job_id}/outline")
 def post_outline(job_id: str) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM（SUMMARY_*）"}, status_code=422)
+    guard = _llm_guard("outline")
+    if guard is not None:
+        return guard
     job, segs_or_resp = _job_segments(job_id)
     if isinstance(segs_or_resp, JSONResponse):
         return segs_or_resp
@@ -109,7 +120,7 @@ def post_outline(job_id: str) -> JSONResponse:
     title = job.title or "未命名视频"
     user = f"视频标题：{title}\n\n请用简体中文输出 skeleton 与 map.summary。\n\n<transcript>\n{transcript}\n</transcript>"
     try:
-        result = llm_service.chat_json(prompts.OUTLINE_SYSTEM, user)
+        result = llm_service.chat_json(prompts.OUTLINE_SYSTEM, user, task="outline")
     except Exception as e:
         return JSONResponse({"error": f"生成骨架失败：{e}"}, status_code=502)
 
@@ -122,8 +133,9 @@ def post_outline(job_id: str) -> JSONResponse:
 
 @router.post("/{job_id}/highlight")
 def post_highlight(job_id: str, body: GoalBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM（SUMMARY_*）"}, status_code=422)
+    guard = _llm_guard("highlight")
+    if guard is not None:
+        return guard
     job, segs_or_resp = _job_segments(job_id)
     if isinstance(segs_or_resp, JSONResponse):
         return segs_or_resp
@@ -144,8 +156,9 @@ def post_highlight(job_id: str, body: GoalBody) -> JSONResponse:
 @router.post("/{job_id}/highlight/stream")
 def post_highlight_stream(job_id: str, body: GoalBody) -> StreamingResponse:
     """分批并行标注，SSE 流式返回进度与部分结果。"""
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM（SUMMARY_*）"}, status_code=422)  # type: ignore[return-value]
+    guard = _llm_guard("highlight")
+    if guard is not None:
+        return guard  # type: ignore[return-value]
 
     job, segs_or_resp = _job_segments(job_id)
     if isinstance(segs_or_resp, JSONResponse):
@@ -178,14 +191,13 @@ def post_highlight_stream(job_id: str, body: GoalBody) -> StreamingResponse:
 
 @router.post("/{job_id}/questions")
 def post_questions(job_id: str, body: QuestionsBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM（SUMMARY_*）"}, status_code=422)
+    guard = _llm_guard("quiz")
+    if guard is not None:
+        return guard
     job, segs_or_resp = _job_segments(job_id)
     if isinstance(segs_or_resp, JSONResponse):
         return segs_or_resp
     segs = segs_or_resp
-
-    # 优先用高相关段，否则全文
     sess = store.get(job_id)
     hi = sess.highlights or {}
     rel_map = {item["index"]: item.get("relevance", 0) for item in hi.get("segments", [])}
@@ -203,7 +215,7 @@ def post_questions(job_id: str, body: QuestionsBody) -> JSONResponse:
         + f"<transcript>\n{transcript}\n</transcript>"
     )
     try:
-        result = llm_service.chat_json(prompts.QUESTIONS_SYSTEM, user)
+        result = llm_service.chat_json(prompts.QUESTIONS_SYSTEM, user, task="quiz")
     except Exception as e:
         return JSONResponse({"error": f"出题失败：{e}"}, status_code=502)
 
@@ -218,7 +230,7 @@ def post_questions(job_id: str, body: QuestionsBody) -> JSONResponse:
 
 @router.post("/transcribe-answer")
 async def transcribe_answer(file: UploadFile = File(...)) -> JSONResponse:
-    """语音答案 → 文字（优先本地 Whisper，降级云端 STT）。"""
+    """语音答案 → 文字（使用当前转录方案）。"""
     vs = voice_stt.voice_status()
     if not vs["available"]:
         return JSONResponse({"error": "转写模型不可用"}, status_code=422)
@@ -243,8 +255,9 @@ async def transcribe_answer(file: UploadFile = File(...)) -> JSONResponse:
 
 @router.post("/{job_id}/grade")
 def post_grade(job_id: str, body: GradeBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM"}, status_code=422)
+    guard = _llm_guard("grade")
+    if guard is not None:
+        return guard
     sess = store.get(job_id)
     if not sess.questions:
         return JSONResponse({"error": "请先生成自测题"}, status_code=422)
@@ -263,7 +276,7 @@ def post_grade(job_id: str, body: GradeBody) -> JSONResponse:
         )
     user = f"学习目标：{sess.goal}\n\n" + "\n".join(lines)
     try:
-        result = llm_service.chat_json(prompts.GRADE_ANSWERS_SYSTEM, user)
+        result = llm_service.chat_json(prompts.GRADE_ANSWERS_SYSTEM, user, task="grade")
     except Exception as e:
         return JSONResponse({"error": f"批改失败：{e}"}, status_code=502)
 
@@ -275,8 +288,9 @@ def post_grade(job_id: str, body: GradeBody) -> JSONResponse:
 
 @router.post("/{job_id}/grade/chat")
 def post_grade_chat(job_id: str, body: GradeChatBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM"}, status_code=422)
+    guard = _llm_guard("grade")
+    if guard is not None:
+        return guard
     sess = store.get(job_id)
     qid = str(body.question_id)
     q = next((x for x in sess.questions if x.get("id") == body.question_id), None)
@@ -295,7 +309,7 @@ def post_grade_chat(job_id: str, body: GradeChatBody) -> JSONResponse:
     messages.append({"role": "user", "content": body.message})
 
     try:
-        reply = llm_service.chat_messages(prompts.GRADE_CHAT_SYSTEM, messages)
+        reply = llm_service.chat_messages(prompts.GRADE_CHAT_SYSTEM, messages, task="grade")
     except Exception as e:
         return JSONResponse({"error": f"对话失败：{e}"}, status_code=502)
 
@@ -319,8 +333,9 @@ def post_grade_confirm(job_id: str, body: GradeConfirmBody) -> JSONResponse:
 
 @router.post("/{job_id}/feynman/grade")
 def post_feynman_grade(job_id: str, body: FeynmanBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM"}, status_code=422)
+    guard = _llm_guard("feynman")
+    if guard is not None:
+        return guard
     sess = store.get(job_id)
     user = (
         f"学习目标：{sess.goal}\n\n"
@@ -329,7 +344,7 @@ def post_feynman_grade(job_id: str, body: FeynmanBody) -> JSONResponse:
         + f"\n\n学习者费曼复述：\n{body.draft.strip()}"
     )
     try:
-        result = llm_service.chat_json(prompts.FEYNMAN_GRADE_SYSTEM, user)
+        result = llm_service.chat_json(prompts.FEYNMAN_GRADE_SYSTEM, user, task="feynman")
     except Exception as e:
         return JSONResponse({"error": f"费曼批改失败：{e}"}, status_code=502)
 
@@ -341,8 +356,9 @@ def post_feynman_grade(job_id: str, body: FeynmanBody) -> JSONResponse:
 
 @router.post("/{job_id}/feynman/chat")
 def post_feynman_chat(job_id: str, body: ChatBody) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM"}, status_code=422)
+    guard = _llm_guard("feynman")
+    if guard is not None:
+        return guard
     sess = store.get(job_id)
     history = list(sess.feynman_chat)
     context = f"学习目标：{sess.goal}\n费曼草稿：\n{sess.feynman_draft}\n初次批改：{sess.feynman_grade}\n"
@@ -351,7 +367,7 @@ def post_feynman_chat(job_id: str, body: ChatBody) -> JSONResponse:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": body.message})
     try:
-        reply = llm_service.chat_messages(prompts.FEYNMAN_CHAT_SYSTEM, messages)
+        reply = llm_service.chat_messages(prompts.FEYNMAN_CHAT_SYSTEM, messages, task="feynman")
     except Exception as e:
         return JSONResponse({"error": f"对话失败：{e}"}, status_code=502)
 
@@ -372,8 +388,9 @@ def post_feynman_confirm(job_id: str, body: FeynmanBody) -> JSONResponse:
 
 @router.post("/{job_id}/report")
 def post_report(job_id: str) -> JSONResponse:
-    if not llm_service.llm_available():
-        return JSONResponse({"error": "未配置 LLM"}, status_code=422)
+    guard = _llm_guard("report")
+    if guard is not None:
+        return guard
     sess = store.get(job_id)
     job = jobs.registry.get(job_id)
     title = sess.title or (job.title if job else "") or "未命名视频"
@@ -391,6 +408,7 @@ def post_report(job_id: str) -> JSONResponse:
         report = llm_service.chat_text(
             prompts.REPORT_SYSTEM.replace("{标题}", title),
             user,
+            task="report",
         )
     except Exception as e:
         return JSONResponse({"error": f"报告生成失败：{e}"}, status_code=502)
