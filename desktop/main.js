@@ -175,7 +175,7 @@ async function createWindow() {
     backgroundColor: "#ECE6D6", // 护眼米黄，规避启动白屏
     show: true,
     autoHideMenuBar: true,
-    icon: path.join(__dirname, "build", "icon.ico"),
+    icon: path.join(__dirname, "app-icon.ico"),
     title: "AI原生学习",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
