@@ -1,7 +1,7 @@
 {
   "name": "ai-native-learning-desktop",
   "productName": "AiNativeLearning",
-  "version": "0.0.1",
+  "version": "0.0.3",
   "description": "ai-native-learning desktop launcher (Electron shell + Python backend via uv)",
   "main": "main.js",
   "author": "xk",
@@ -24,11 +24,12 @@
     "files": [
       "main.js",
       "preload.js",
-      "loading.html"
+      "loading.html",
+      "app-icon.ico"
     ],
     "compression": "store",
     "win": {
-      "icon": "build/icon.ico",
+      "icon": "app-icon.ico",
       "target": [
         {
           "target": "portable",
