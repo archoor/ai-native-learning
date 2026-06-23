@@ -18,9 +18,9 @@
       <form class="url-area" id="urlForm">
         <input type="text" id="urlInput" data-i18n-placeholder="urlPlaceholder"
           data-i18n-title="urlTitle"
-          placeholder="视频链接，或本地视频文件路径（如 E:\videos\demo.mp4）"
+          placeholder="视频/网页链接，或本地文件路径（视频/音频/txt/md/pdf）"
           autocomplete="off" spellcheck="false" />
-        <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flv,.ts" hidden />
+        <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flv,.ts,.txt,.md,.markdown,.pdf" hidden />
         <button class="btn" id="pickBtn" type="button" data-i18n="pickFile" data-i18n-title="pickFileTitle">选择文件</button>
         <button class="btn primary" id="loadBtn" type="submit" data-i18n="load">加载</button>
       </form>
@@ -99,6 +99,24 @@
               <div class="cap-target line" id="capTarget"></div>
             </div>
             <button class="fs-btn" id="fsBtn" type="button" title="全屏" aria-label="全屏">⛶</button>
+          </div>
+        </div>
+
+        <div class="reader-wrap" id="readerWrap" hidden>
+          <div class="reader-head">
+            <div class="reader-title" id="readerTitle"></div>
+            <div class="reader-meta" id="readerMeta"></div>
+            <div class="reader-prog" id="readerProg" hidden>
+              <div class="rp-bar"><div id="readerProgBar"></div></div>
+              <span id="readerProgText"></span>
+            </div>
+          </div>
+          <div class="reader-body" id="readerBody">
+            <div class="reader-loading" id="readerLoading" hidden>
+              <div class="rl-spinner"></div>
+              <div class="rl-text" id="readerLoadingText"></div>
+            </div>
+            <article class="reader-article" id="readerArticle"></article>
           </div>
         </div>
       </div>
@@ -378,6 +396,7 @@
     I18n.applyPageI18n();
   </script>
   <script src="/app.js"></script>
+  <script src="/reader.js"></script>
   <script src="/learning-panel.js"></script>
 </body>
 

@@ -12,7 +12,8 @@ const state = {
   srcLang: "",
   title: "",
   duration: 0,
-  segs: [],          // [{index,start,end,source,target}]
+  contentKind: "video", // 'video' | 'text'：决定显示播放器还是阅读器
+  segs: [],          // [{index,start,end,source,target,kind?}]
   llm: false,
   progress: {        // 各阶段进度
     download: 0,
@@ -93,7 +94,8 @@ function setSteps(activeKey, doneKeys) {
 function showProcessing(stageText, subText, pct, activeKey, doneKeys) {
   hideBanner();
   setPlaceholder(false);
-  $("playerWrap").hidden = true;
+  // 已有视频源时（如命中缓存后回放早期状态），避免把播放器误隐藏成白屏。
+  if (!video.getAttribute("src")) $("playerWrap").hidden = true;
   const v = $("vprog");
   v.hidden = false;
   v.classList.add("show");
@@ -107,6 +109,13 @@ function hideProcessing() {
   const v = $("vprog");
   v.hidden = true;
   v.classList.remove("show");
+}
+
+function ensurePlayerVisible() {
+  if (state.contentKind !== "video") return;
+  if (!video.getAttribute("src")) return;
+  setPlaceholder(false);
+  $("playerWrap").hidden = false;
 }
 
 // ---------- 字幕生成进度条（转录/翻译并行） ----------
@@ -167,6 +176,7 @@ function setPlaceholder(visible) {
 
 function startJobFromSnapshot(data) {
   state.jobId = data.id;
+  if (data.url) lastSource = data.url;
   setPlaceholder(false);
   applySnapshot(data);
   openEvents(data.id);
@@ -191,7 +201,10 @@ async function submitJob(src) {
       toast(msg, 4000);
       return;
     }
-    pushHistory(src, data.title || displayNameFromSource(src));
+    const canonical = data.url || src;
+    lastSource = canonical;
+    await fetchHistory();
+    await pushHistory(canonical, data.title || displayNameFromSource(canonical));
     startJobFromSnapshot(data);
   } catch (err) {
     showBanner(tr("submitFailed", { msg: err.message }), "error");
@@ -264,6 +277,151 @@ async function pushHistory(source, name, opts = {}) {
     }
   } catch {}
   if (!opts.silent && !$("historyPanel").hidden) renderHistoryPanel();
+}
+
+// ---------- 播放进度（按 source 持久化到后端历史 + localStorage 兜底）----------
+const POSITION_MIN_SEC = 5;
+const POSITION_END_RATIO = 0.95;
+const POSITION_SAVE_MS = 5000;
+const POS_LOCAL_KEY = "anl_playback_pos";
+let lastSavedPosition = 0;
+let lastPositionSaveAt = 0;
+let pendingRestorePosition = null;
+let restoreAttempted = false;
+
+function readLocalPositions() {
+  try {
+    const raw = localStorage.getItem(POS_LOCAL_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalPosition(source, pos) {
+  if (!source) return;
+  try {
+    const map = readLocalPositions();
+    if (pos > 0) map[source] = pos;
+    else delete map[source];
+    localStorage.setItem(POS_LOCAL_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+function positionForSource(source) {
+  if (!source) return 0;
+  const it = historyCache.find((x) => x.source === source);
+  const fromHistory = it && it.position_sec > 0 ? Number(it.position_sec) : 0;
+  const fromLocal = Number(readLocalPositions()[source] || 0);
+  return Math.max(fromHistory, fromLocal);
+}
+
+function planRestorePosition() {
+  restoreAttempted = false;
+  if (!lastSource || state.contentKind !== "video") {
+    pendingRestorePosition = null;
+    return;
+  }
+  const pos = positionForSource(lastSource);
+  pendingRestorePosition = pos >= POSITION_MIN_SEC ? pos : null;
+}
+
+function postPositionPayload(source, pos) {
+  const payload = JSON.stringify({ source, position_sec: pos });
+  if (navigator.sendBeacon) {
+    const blob = new Blob([payload], { type: "application/json" });
+    return navigator.sendBeacon("/api/history/position", blob);
+  }
+  fetch("/api/history/position", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload,
+    keepalive: true,
+  }).catch(() => {});
+  return true;
+}
+
+async function savePlaybackPosition(force = false) {
+  if (!lastSource || state.contentKind !== "video") return;
+  if (!video.getAttribute("src")) return;
+  const dur = video.duration;
+  if (!dur || !Number.isFinite(dur)) return;
+
+  const t = video.currentTime || 0;
+  const now = Date.now();
+  if (!force && now - lastPositionSaveAt < POSITION_SAVE_MS) return;
+  if (!force && Math.abs(t - lastSavedPosition) < 1) return;
+
+  let pos = t;
+  if (t >= dur * POSITION_END_RATIO) pos = 0;
+
+  lastPositionSaveAt = now;
+  lastSavedPosition = pos;
+  writeLocalPosition(lastSource, pos);
+
+  const it = historyCache.find((x) => x.source === lastSource);
+  if (it) {
+    if (pos > 0) it.position_sec = pos;
+    else delete it.position_sec;
+  }
+
+  if (force) {
+    postPositionPayload(lastSource, pos);
+    return;
+  }
+  try {
+    const res = await fetch("/api/history/position", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: lastSource, position_sec: pos }),
+    });
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.items)) {
+      historyCache = data.items.slice(0, HISTORY_MAX);
+    }
+  } catch {}
+}
+
+function restorePlaybackPosition() {
+  if (restoreAttempted || pendingRestorePosition == null) {
+    if (pendingRestorePosition == null) forceFirstFrame();
+    return;
+  }
+  const dur = video.duration;
+  if (!dur || !Number.isFinite(dur)) return;
+
+  const pos = pendingRestorePosition;
+  if (pos >= dur * POSITION_END_RATIO || pos < POSITION_MIN_SEC) {
+    pendingRestorePosition = null;
+    restoreAttempted = true;
+    forceFirstFrame();
+    return;
+  }
+
+  const doSeek = () => {
+    if (restoreAttempted || pendingRestorePosition == null) return;
+    restoreAttempted = true;
+    pendingFirstFrame = false;
+    pendingRestorePosition = null;
+    const target = pos;
+    const onSeeked = () => {
+      video.removeEventListener("seeked", onSeeked);
+      if (Math.abs(video.currentTime - target) > 2) return;
+      toast(tr("resumeFrom", { time: fmt(target) }));
+      refreshCaption(true);
+    };
+    video.addEventListener("seeked", onSeeked);
+    try {
+      video.currentTime = target;
+    } catch {
+      video.removeEventListener("seeked", onSeeked);
+      forceFirstFrame();
+    }
+  };
+
+  if (video.readyState >= 2) doSeek();
+  else video.addEventListener("canplay", doSeek, { once: true });
 }
 
 async function removeHistory(source) {
@@ -361,6 +519,9 @@ async function uploadFile(file) {
       toast(msg, 4000);
       return;
     }
+    if (data.url) lastSource = data.url;
+    await fetchHistory();
+    await pushHistory(lastSource, data.title || displayNameFromSource(lastSource));
     startJobFromSnapshot(data);
   } catch (err) {
     showBanner(tr("submitFailed", { msg: err.message }), "error");
@@ -381,9 +542,14 @@ function resetForNewJob() {
   };
   curIdx = -1;
   state.title = "";
+  pendingRestorePosition = null;
+  restoreAttempted = false;
+  lastSavedPosition = 0;
+  setContentKind("video");
   setNowPlaying("");
   hideProcessing();
   hideSubtitleBar();
+  if (window.Reader) Reader.hide();
   $("playerWrap").hidden = true;
   setPlaceholder(true);
   $("capSource").textContent = "";
@@ -397,6 +563,7 @@ function applySnapshot(data) {
   state.status = data.status;
   state.srcLang = data.src_lang || "";
   state.duration = data.duration || 0;
+  if (data.content_kind) setContentKind(data.content_kind);
   if (data.title) {
     state.title = data.title;
     setNowPlaying(data.title);
@@ -410,6 +577,64 @@ function applySnapshot(data) {
   renderStatus();
   updateMeta();
   notifyLearningPanel();
+}
+
+function setContentKind(kind) {
+  state.contentKind = kind === "text" ? "text" : "video";
+  document.body.dataset.content = state.contentKind;
+}
+
+// 文本事件成批到达（分段、批量译文）；用 rAF 合并，避免每条事件都整篇重渲染。
+let textRenderScheduled = false;
+function scheduleTextRender() {
+  if (state.contentKind !== "text" || !window.Reader) return;
+  if (textRenderScheduled) return;
+  textRenderScheduled = true;
+  requestAnimationFrame(() => {
+    textRenderScheduled = false;
+    Reader.render(state.segs, state.title);
+    const t = state.progress.translate;
+    Reader.setProgress(t.done || translatedCount(), t.total || transcribedCount());
+  });
+}
+
+/** 文本来源（阅读器）的状态渲染：替代视频的进度环/字幕条。 */
+function renderTextStatus() {
+  if (window.Reader) Reader.show();
+  $("playerWrap").hidden = true;
+  hideProcessing();
+  hideSubtitleBar();
+  setPlaceholder(false);
+  switch (state.status) {
+    case "queued":
+    case "fetching":
+      hideBanner();
+      if (window.Reader) Reader.setLoading(tr("readerFetching"));
+      break;
+    case "extracting":
+      hideBanner();
+      if (window.Reader) Reader.setLoading(tr("readerExtracting"));
+      break;
+    case "ready":
+    case "translating":
+      hideBanner();
+      if (window.Reader) Reader.setTranslating(true);
+      scheduleTextRender();
+      break;
+    case "done":
+      hideBanner();
+      if (window.Reader) {
+        Reader.setTranslating(false);
+        Reader.render(state.segs, state.title);
+        Reader.setProgress(1, 1);
+      }
+      break;
+    case "error":
+      setStatusDot("error");
+      break;
+    default:
+      break;
+  }
 }
 
 function setNowPlaying(name) {
@@ -448,7 +673,10 @@ function handleEvent(msg) {
       renderStatus();
       break;
     case "ready":
+      // ready 事件可能先于/晚于 status 事件到达，显式更新避免沿用 queued 状态。
+      if (state.status !== "done" && state.status !== "error") state.status = "ready";
       state.duration = msg.duration || state.duration;
+      if (msg.content_kind) setContentKind(msg.content_kind);
       if (msg.title) {
         state.title = msg.title;
         setNowPlaying(msg.title);
@@ -466,11 +694,13 @@ function handleEvent(msg) {
       state.segs[i] = {
         index: i, start: msg.start, end: msg.end,
         source: msg.source || "", target: (state.segs[i] && state.segs[i].target) || "",
+        kind: msg.kind || (state.segs[i] && state.segs[i].kind) || "p",
+        no_translate: !!msg.no_translate,
       };
       syncProgressFromSegments();
       renderStatus();
       updateMeta();
-      refreshCaption();
+      if (state.contentKind !== "text") refreshCaption();
       notifyLearningPanel();
       break;
     }
@@ -479,7 +709,7 @@ function handleEvent(msg) {
       if (state.segs[i]) state.segs[i].target = msg.target || "";
       syncProgressFromSegments();
       renderStatus();
-      refreshCaption();
+      if (state.contentKind !== "text") refreshCaption();
       notifyLearningPanel();
       break;
     }
@@ -505,19 +735,23 @@ function handleEvent(msg) {
 
 function setVideoSource(url) {
   setPlaceholder(false);
+  planRestorePosition();
   if (video.getAttribute("src") === url) {
     $("playerWrap").hidden = false;
-    forceFirstFrame();
+    if (video.readyState >= 1) restorePlaybackPosition();
+    else pendingFirstFrame = pendingRestorePosition == null;
     return;
   }
   video.src = url;
-  pendingFirstFrame = true; // 新源：待解码并绘制首帧
+  pendingFirstFrame = pendingRestorePosition == null;
   video.load();
   $("playerWrap").hidden = false;
 }
 
 function transcribedCount() { return state.segs.filter((s) => s && s.source).length; }
-function translatedCount() { return state.segs.filter((s) => s && s.target).length; }
+function translatedCount() {
+  return state.segs.filter((s) => s && (s.target || s.no_translate)).length;
+}
 
 /** 续接/快照回放时，用已有字幕段回填 progress，避免缺 total 误显示「分析音频」。 */
 function syncProgressFromSegments() {
@@ -539,7 +773,8 @@ function readySeconds() {
   let end = 0;
   for (let i = 0; i < state.segs.length; i++) {
     const s = state.segs[i];
-    if (!s || !s.source || !s.target) break; // 遇到首个未就绪段即停
+    if (!s || !s.source) break;
+    if (!s.target && !s.no_translate) break; // 中文段无需译文，视为已就绪
     end = s.end;
   }
   return end;
@@ -547,8 +782,9 @@ function readySeconds() {
 
 let doneHideTimer = null;
 function renderStatus() {
-  const p = state.progress;
   if (doneHideTimer) { clearTimeout(doneHideTimer); doneHideTimer = null; }
+  if (state.contentKind === "text") { renderTextStatus(); return; }
+  const p = state.progress;
   switch (state.status) {
     case "queued":
       showProcessing(tr("progQueued"), tr("progQueuedSub"), 0, null, []);
@@ -562,6 +798,7 @@ function renderStatus() {
     case "ready":
       hideProcessing();
       hideBanner();
+      ensurePlayerVisible();
       showSubtitleBar(tr("progReadyPrep"), 0, "", false);
       break;
     // 转录与翻译并行：视频已可播放，进度移到视频卡顶部细条
@@ -569,6 +806,7 @@ function renderStatus() {
     case "translating": {
       hideProcessing();
       hideBanner();
+      ensurePlayerVisible();
       syncProgressFromSegments();
       const t = state.progress.transcribe;
       const nTotal = transcribedCount();
@@ -600,6 +838,7 @@ function renderStatus() {
     case "done":
       hideProcessing();
       hideBanner();
+      ensurePlayerVisible();
       showSubtitleBar(
         tr("subReady"),
         100,
@@ -651,7 +890,7 @@ function refreshCaption(force) {
   if (seg.target) {
     tgt.textContent = seg.target;
     tgt.classList.remove("pending");
-  } else if (state.status === "translating" || state.status === "transcribing") {
+  } else if ((state.status === "translating" || state.status === "transcribing") && !seg.no_translate) {
     tgt.textContent = tr("pendingTranslate");
     tgt.classList.add("pending");
   } else {
@@ -660,16 +899,24 @@ function refreshCaption(force) {
   }
 }
 
-video.addEventListener("timeupdate", () => refreshCaption());
+video.addEventListener("timeupdate", () => {
+  refreshCaption();
+  savePlaybackPosition();
+});
 video.addEventListener("seeked", () => refreshCaption(true));
+video.addEventListener("pause", () => { savePlaybackPosition(true); });
+function flushPlaybackPosition() { savePlaybackPosition(true); }
+window.addEventListener("pagehide", flushPlaybackPosition);
+window.addEventListener("beforeunload", flushPlaybackPosition);
 
 // 首帧绘制：轻推 currentTime 强制 Chromium 解码并绘制第一帧，避免黑屏。
 // 用一次性标志 + 多事件兜底（冷启动转码完成后 loadeddata 可能早于 seekable，单一事件不可靠）。
 let pendingFirstFrame = false;
 function forceFirstFrame() {
   if (!pendingFirstFrame) return;
-  if (video.readyState < 1) return;          // 元数据未就绪，等下个事件
-  if (!video.paused) { pendingFirstFrame = false; return; } // 已在播放，无需推
+  if (video.readyState < 1) return;
+  if (!video.paused) { pendingFirstFrame = false; return; }
+  if (video.currentTime >= 1) { pendingFirstFrame = false; return; }
   if (video.currentTime < 0.05) {
     try { video.currentTime = 0.08; } catch (_) { return; } // 失败保留标志，等下个事件重试
   }
@@ -721,7 +968,10 @@ function applyPlaybackRate() {
 }
 $("speed").onchange = applyPlaybackRate;
 // 切换视频源时浏览器会把 playbackRate 重置为 1，需重新应用所选倍速
-video.addEventListener("loadedmetadata", () => { applyPlaybackRate(); forceFirstFrame(); });
+video.addEventListener("loadedmetadata", () => {
+  applyPlaybackRate();
+  restorePlaybackPosition();
+});
 video.addEventListener("ratechange", () => {
   const cur = String(video.playbackRate);
   if ([...$("speed").options].some((o) => o.value === cur)) $("speed").value = cur;
@@ -1169,22 +1419,47 @@ document.addEventListener("keydown", (e) => {
 // ---------- 初始化 ----------
 window.LearnBridge = {
   seek(t) {
-    if (video && !isNaN(t)) {
+    if (isNaN(t)) return;
+    // 文本来源：把"时间"当作段落序号，滚动定位阅读器对应段落
+    if (state.contentKind === "text") {
+      if (window.Reader) Reader.scrollToIndex(t);
+      return;
+    }
+    if (video) {
       video.currentTime = t;
       video.play().catch(() => {});
     }
   },
+  get contentKind() { return state.contentKind; },
   get jobId() { return state.jobId; },
   get segments() { return state.segs; },
   toast,
 };
+
+async function syncLocalPositionsToBackend() {
+  const map = readLocalPositions();
+  const entries = Object.entries(map).filter(([, pos]) => Number(pos) >= POSITION_MIN_SEC);
+  for (const [source, pos] of entries) {
+    try {
+      await fetch("/api/history/position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, position_sec: Number(pos) }),
+      });
+    } catch {}
+  }
+  if (entries.length) await fetchHistory();
+}
 
 (function init() {
   bindSecretFields();
   const savedTheme = localStorage.getItem("vt_theme");
   if (savedTheme) document.body.dataset.theme = savedTheme;
   $("langBtn").textContent = I18n.getLocale() === "zh" ? "EN" : "中";
-  migrateHistoryFromLocalStorage().then(() => fetchHistory()).catch(() => {});
+  migrateHistoryFromLocalStorage()
+    .then(() => syncLocalPositionsToBackend())
+    .then(() => fetchHistory())
+    .catch(() => {});
   fetch("/api/health").then((r) => r.json()).then((h) => {
     state.llm = !!h.llm;
     if (!h.stt) toast(tr("noStt"), 5000);

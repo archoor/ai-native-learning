@@ -2,7 +2,9 @@
 # Use Unicode code points for Chinese label to avoid PS script encoding issues (UTF-8 vs GBK).
 $DesktopDir = $PSScriptRoot
 $ProjectRoot = (Resolve-Path (Join-Path $DesktopDir "..\..")).Path
-$ExePath = (Resolve-Path (Join-Path $DesktopDir "release\AiNativeLearning.exe")).Path
+# 使用 win-unpacked 目录版（含 resources/backend）；单文件 portable 不含 4GB+ 后端会启动失败
+$ExePath = (Resolve-Path (Join-Path $DesktopDir "release\win-unpacked\AiNativeLearning.exe")).Path
+$WorkDir = Split-Path $ExePath -Parent
 $IconPath = (Resolve-Path (Join-Path $DesktopDir "app-icon.ico")).Path
 $Desktop = [Environment]::GetFolderPath("Desktop")
 
@@ -31,7 +33,7 @@ Get-ChildItem (Join-Path $Desktop "*.lnk") -ErrorAction SilentlyContinue | ForEa
 
 $shortcut = $shell.CreateShortcut($ShortcutPath)
 $shortcut.TargetPath = $ExePath
-$shortcut.WorkingDirectory = $ProjectRoot
+$shortcut.WorkingDirectory = $WorkDir
 $shortcut.WindowStyle = 1
 $shortcut.Description = $AppLabel
 $shortcut.IconLocation = ($IconPath + ',0')

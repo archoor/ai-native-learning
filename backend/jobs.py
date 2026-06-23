@@ -19,10 +19,21 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from subtitle_player.backend.parser import detect_lang
+
 
 def job_id_for(key: str) -> str:
     """按来源标识生成稳定 job_id（同一来源复用结果）。"""
     return hashlib.sha256(key.strip().encode("utf-8")).hexdigest()[:16]
+
+
+# 文本类来源（网页文章 / 本地或上传的 txt/md/pdf）：走「抽取正文 → 切段 → 翻译」流程，
+# 不下载、不转码、不转录。其余（url/local/upload）为视频/音频来源。
+TEXT_SOURCE_TYPES = {"web", "doc", "doc_upload"}
+
+
+def is_text_source(source_type: str) -> bool:
+    return source_type in TEXT_SOURCE_TYPES
 
 
 _YT_HOSTS = {
@@ -103,7 +114,8 @@ def file_fingerprint(path: str | Path, chunk: int = 1 << 20) -> str:
 class Job:
     id: str
     url: str                      # 来源标识：URL / 本地路径 / 上传文件路径
-    source_type: str = "url"      # 'url' | 'local' | 'upload'
+    source_type: str = "url"      # 'url'|'local'|'upload'（视频）| 'web'|'doc'|'doc_upload'（文本）
+    content_kind: str = "video"   # 'video' | 'text'：决定前端走播放器还是阅读器
     status: str = "queued"
     error: str = ""
     video_path: str = ""          # 本地可播放 mp4 绝对路径
@@ -134,17 +146,22 @@ class Job:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
+            segs = list(self.segments)
+            for s in segs:
+                if s and s.get("source") and "no_translate" not in s:
+                    s["no_translate"] = detect_lang(s["source"]) == "zh"
             return {
                 "id": self.id,
                 "url": self.url,
                 "source_type": self.source_type,
+                "content_kind": self.content_kind,
                 "status": self.status,
                 "error": self.error,
                 "duration": self.duration,
                 "src_lang": self.src_lang,
                 "title": self.title,
                 "video_url": f"/api/video/{self.id}" if self.video_path else "",
-                "segments": list(self.segments),
+                "segments": segs,
             }
 
 
@@ -171,7 +188,8 @@ class JobRegistry:
             existing = self._jobs.get(jid)
             if existing is not None:
                 return existing, False
-            job = Job(id=jid, url=source, source_type=source_type)
+            kind = "text" if is_text_source(source_type) else "video"
+            job = Job(id=jid, url=source, source_type=source_type, content_kind=kind)
             self._jobs[jid] = job
             return job, True
 
@@ -182,18 +200,23 @@ registry = JobRegistry()
 # ── 结果持久化（用于同一来源复用，免重复下载/转录/翻译）──────────────────────
 
 def save_result(job: Job) -> None:
-    if not job.video_path:
-        return
     from . import store
 
     data = {
         "url": job.url,
-        "video_file": Path(job.video_path).name,
+        "content_kind": job.content_kind,
         "duration": job.duration,
         "src_lang": job.src_lang,
         "title": job.title,
         "segments": job.segments,
     }
+    if job.content_kind == "text":
+        # 文本来源无视频文件，整包缓存 segments 供下次直接回放。
+        data["source_type"] = job.source_type
+    else:
+        if not job.video_path:
+            return
+        data["video_file"] = Path(job.video_path).name
     store.vtjob_path(job.id).write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )

@@ -16,6 +16,7 @@ FastAPI 应用：托管前端 + AI原生学习流水线接口。
   POST /api/models-config/test/proxy 测试备用下载代理
   GET  /api/history            最近打开的视频（最多 10 条）
   POST /api/history            记录打开视频
+  POST /api/history/position   更新播放进度（秒）
   POST /api/history/remove     从历史中移除
 """
 
@@ -38,6 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field  # noqa: E402
 
 from . import history, jobs, model_config, pipeline  # noqa: E402
+from .content import extractor  # noqa: E402
 from .learning.routes import router as learn_router  # noqa: E402
 from .live_transcribe import cloud_stt_available  # noqa: E402
 from .paths import frontend_dir, media_dir  # noqa: E402
@@ -48,6 +50,8 @@ _MEDIA_EXTS = {
     ".mp4", ".mkv", ".mov", ".webm", ".avi", ".flv", ".m4v", ".ts", ".wmv",
     ".mp3", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".opus",
 }
+# 可处理的本地文本扩展名（网页文章 / txt / md / pdf 走文本学习流程）
+_TEXT_EXTS = extractor.TEXT_EXTS
 
 app = FastAPI(title="AI原生学习")
 app.include_router(learn_router)
@@ -86,6 +90,11 @@ class HistoryBody(BaseModel):
     name: str = Field("")
 
 
+class HistoryPositionBody(BaseModel):
+    source: str = Field(..., min_length=1)
+    position_sec: float = Field(..., ge=0)
+
+
 @app.get("/api/health")
 def health() -> dict:
     r = model_config.readiness()
@@ -111,29 +120,42 @@ def _stt_guard() -> JSONResponse | None:
 def submit_job(body: JobBody) -> JSONResponse:
     src = body.resolved()
     if not src:
-        return JSONResponse({"error": "请输入视频链接或本地文件路径"}, status_code=422)
-    guard = _stt_guard()
-    if guard is not None:
-        return guard
+        return JSONResponse({"error": "请输入链接或本地文件路径"}, status_code=422)
 
     is_url = src.startswith("http://") or src.startswith("https://")
     if is_url:
-        # 用规范化身份键：同一视频的不同 URL 形态归并，复用缓存、免重复下载
-        key = jobs.canonical_url_key(src)
-        job, _ = jobs.registry.get_or_create(key, src, source_type="url")
+        if extractor.is_video_url(src):
+            # 已知视频站：规范化身份键归并，复用缓存、免重复下载（需转录模型）
+            guard = _stt_guard()
+            if guard is not None:
+                return guard
+            key = jobs.canonical_url_key(src)
+            job, _ = jobs.registry.get_or_create(key, src, source_type="url")
+        else:
+            # 其余链接按网页文章抽取正文学习（不需转录）
+            key = jobs.canonical_url_key(src)
+            job, _ = jobs.registry.get_or_create(key, src, source_type="web")
     else:
         # 本地文件路径：以文件内容指纹为身份键，复用既有结果（与上传互通）
         p = Path(src).expanduser()
         if not p.exists() or not p.is_file():
             return JSONResponse({"error": f"本地文件不存在：{src}"}, status_code=422)
-        if p.suffix.lower() not in _MEDIA_EXTS:
+        suffix = p.suffix.lower()
+        key = jobs.file_fingerprint(p)
+        if suffix in _MEDIA_EXTS:
+            guard = _stt_guard()
+            if guard is not None:
+                return guard
+            job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="local")
+        elif suffix in _TEXT_EXTS:
+            job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="doc")
+        else:
             return JSONResponse(
-                {"error": f"不支持的文件类型「{p.suffix or '无扩展名'}」，请选择视频/音频文件"
-                          f"（如 .mp4/.mkv/.mov/.webm/.mp3/.m4a 等）"},
+                {"error": f"不支持的文件类型「{p.suffix or '无扩展名'}」。"
+                          f"视频/音频：.mp4/.mkv/.mov/.webm/.mp3/.m4a 等；"
+                          f"文本：.txt/.md/.pdf"},
                 status_code=422,
             )
-        key = jobs.file_fingerprint(p)
-        job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="local")
 
     pipeline.start_job(job)
     return JSONResponse(job.snapshot())
@@ -141,17 +163,18 @@ def submit_job(body: JobBody) -> JSONResponse:
 
 @app.post("/api/job/upload")
 async def upload_job(file: UploadFile = File(...)) -> JSONResponse:
-    """上传本地视频/音频文件，保存后按本地文件流程处理。"""
-    guard = _stt_guard()
-    if guard is not None:
-        return guard
-
+    """上传本地视频/音频/文本文件，保存后按对应流程处理。"""
     orig_name = Path(file.filename or "upload.mp4").name
     suffix = Path(orig_name).suffix.lower()
-    if suffix not in _MEDIA_EXTS:
+    is_text = suffix in _TEXT_EXTS
+    if not is_text and suffix not in _MEDIA_EXTS:
         return JSONResponse(
             {"error": f"不支持的文件类型「{suffix}」"}, status_code=422
         )
+    if not is_text:
+        guard = _stt_guard()
+        if guard is not None:
+            return guard
 
     content = await file.read()
     if not content:
@@ -164,7 +187,8 @@ async def upload_job(file: UploadFile = File(...)) -> JSONResponse:
     if not dest.exists():
         dest.write_bytes(content)
 
-    job, _ = jobs.registry.get_or_create(key, str(dest.resolve()), source_type="upload")
+    source_type = "doc_upload" if is_text else "upload"
+    job, _ = jobs.registry.get_or_create(key, str(dest.resolve()), source_type=source_type)
     job.title = Path(orig_name).stem
     pipeline.start_job(job)
     return JSONResponse(job.snapshot())
@@ -282,6 +306,12 @@ def post_history(body: HistoryBody) -> dict:
     return {"items": items}
 
 
+@app.post("/api/history/position")
+def post_history_position(body: HistoryPositionBody) -> dict:
+    items = history.update_position(body.source, body.position_sec)
+    return {"items": items}
+
+
 @app.post("/api/history/remove")
 def post_history_remove(body: HistoryBody) -> dict:
     items = history.remove_history(body.source)
@@ -314,6 +344,11 @@ def app_js() -> FileResponse:
 @app.get("/learning-panel.js")
 def learning_panel_js() -> FileResponse:
     return FileResponse(_FRONTEND / "learning-panel.js", media_type="application/javascript", headers=_NO_CACHE)
+
+
+@app.get("/reader.js")
+def reader_js() -> FileResponse:
+    return FileResponse(_FRONTEND / "reader.js", media_type="application/javascript", headers=_NO_CACHE)
 
 
 @app.get("/i18n.js")

@@ -8,7 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win dir"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
@@ -28,17 +28,20 @@
       "app-icon.ico"
     ],
     "compression": "store",
+    "extraResources": [
+      {
+        "from": "../../dist/AiNativeLearning-backend",
+        "to": "backend"
+      }
+    ],
     "win": {
       "icon": "app-icon.ico",
       "target": [
         {
-          "target": "portable",
+          "target": "dir",
           "arch": ["x64"]
         }
       ]
-    },
-    "portable": {
-      "artifactName": "AiNativeLearning.exe"
     }
   }
 }

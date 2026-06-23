@@ -97,12 +97,18 @@ function startBackend(port) {
     "backend",
     process.platform === "win32" ? "AiNativeLearning-backend.exe" : "AiNativeLearning-backend"
   );
-  if (IS_PACKAGED && fs.existsSync(bundled)) {
-    return spawn(bundled, ["--no-open", "--port", String(port)], {
-      cwd: path.dirname(bundled),
-      windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
-    });
+  if (IS_PACKAGED) {
+    if (fs.existsSync(bundled)) {
+      return spawn(bundled, ["--no-open", "--port", String(port)], {
+        cwd: path.dirname(bundled),
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+      });
+    }
+    throw new Error(
+      "未找到内置后端（resources/backend/AiNativeLearning-backend.exe）。\n\n" +
+        "请使用 release/win-unpacked/AiNativeLearning.exe 启动，或重新执行 npm run dist 生成目录版。"
+    );
   }
   // 启动器/开发态：用 uv 运行源码后端
   const uvExe = findUv();

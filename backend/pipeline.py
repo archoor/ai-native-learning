@@ -43,7 +43,8 @@ from subtitle_player.backend import translator  # noqa: E402
 from subtitle_player.backend.parser import detect_lang  # noqa: E402
 
 from . import store  # noqa: E402
-from .jobs import Job, load_result, save_result  # noqa: E402
+from .content import extractor, segmenter  # noqa: E402
+from .jobs import Job, is_text_source, load_result, save_result  # noqa: E402
 from .live_transcribe import transcribe_segments  # noqa: E402
 from .model_config import get_download_fallback_proxy  # noqa: E402
 from .paths import media_dir  # noqa: E402
@@ -57,6 +58,27 @@ _SENTINEL = object()
 def _set_status(job: Job, status: str) -> None:
     job.status = status
     job.emit({"type": "status", "status": status})
+
+
+def _is_chinese_segment(text: str) -> bool:
+    """逐段判定：CJK 字符不少于拉丁字母即视为中文，不翻译。"""
+    return detect_lang(text) == "zh"
+
+
+def _mark_segment_lang(seg: dict) -> None:
+    if seg.get("source"):
+        seg["no_translate"] = _is_chinese_segment(seg["source"])
+
+
+def _ensure_segments_lang(segments: list[dict]) -> None:
+    for seg in segments:
+        if seg and seg.get("source") and "no_translate" not in seg:
+            _mark_segment_lang(seg)
+
+
+def _translate_done_count(segments: list[dict]) -> int:
+    """翻译进度：已有译文，或中文段（无需翻译）均计为完成。"""
+    return sum(1 for s in segments if s and (s.get("target") or s.get("no_translate")))
 
 
 def _throttled_progress_emitter(job: Job, phase: str, min_delta: float = 1.0):
@@ -119,6 +141,7 @@ def _replay_cached(job: Job, video_path: Path, cached: dict) -> None:
     job.src_lang = cached.get("src_lang") or ""
     job.title = cached.get("title") or ""
     job.segments = list(cached.get("segments") or [])
+    _ensure_segments_lang(job.segments)
 
     job.emit({
         "type": "ready",
@@ -134,6 +157,7 @@ def _replay_cached(job: Job, video_path: Path, cached: dict) -> None:
             "type": "segment",
             "index": seg["index"], "start": seg["start"], "end": seg["end"],
             "source": seg.get("source", ""),
+            "no_translate": bool(seg.get("no_translate")),
         })
         if seg.get("target"):
             job.emit({"type": "translated", "index": seg["index"], "target": seg["target"]})
@@ -171,7 +195,7 @@ def _translate_worker(
     def _flush() -> None:
         if not batch:
             return
-        # 首批前确定源语言（用已攒文本判定更稳）
+        # 文档级 src_lang（入库/展示用）：用本批非中文样本判定
         if not state.get("src_lang"):
             sample = " ".join(job.segments[i]["source"] for i in batch)
             src_lang = detect_lang(sample) or "en"
@@ -180,12 +204,10 @@ def _translate_worker(
             store.save_progress(job.id, src_lang=src_lang)
             job.emit({"type": "lang", "src_lang": src_lang})
 
-        src_lang = state["src_lang"]
-        target_lang = "zh" if src_lang == "en" else "en"
         lines = [job.segments[i]["source"] for i in batch]
         try:
             translated = translator._translate_batch(
-                lines, target_lang, model, base_url, api_key,
+                lines, "zh", model, base_url, api_key,
                 temperature=params.temperature, max_tokens=params.max_tokens,
             )
         except Exception as e:  # noqa: BLE001
@@ -198,7 +220,7 @@ def _translate_worker(
                 store.append_translation(job.id, i, tr)
                 job.emit({"type": "translated", "index": i, "target": tr})
 
-        done = sum(1 for s in job.segments if s.get("target"))
+        done = _translate_done_count(job.segments)
         job.emit({"type": "progress", "phase": "translate",
                   "done": done, "total": len(job.segments)})
         batch.clear()
@@ -212,7 +234,12 @@ def _translate_worker(
         if item is _SENTINEL:
             _flush()
             break
-        batch.append(item)
+        seg = job.segments[item]
+        if not seg.get("no_translate"):
+            if "no_translate" not in seg:
+                _mark_segment_lang(seg)
+            if not seg.get("no_translate"):
+                batch.append(item)
         if len(batch) >= TRANSLATE_BATCH:
             _flush()
 
@@ -252,10 +279,11 @@ def _resume_from_store(job: Job, video_path: Path, progress: dict) -> float:
     store.rewrite_translations(job.id, kept_trans)
 
     job.segments = committed
+    _ensure_segments_lang(committed)
 
     n = len(committed)
     if n:
-        trans_done = sum(1 for s in committed if s.get("target"))
+        trans_done = _translate_done_count(committed)
         job.emit({
             "type": "progress", "phase": "transcribe",
             "done": n, "total": n,
@@ -280,6 +308,7 @@ def _resume_from_store(job: Job, video_path: Path, progress: dict) -> float:
             "type": "segment",
             "index": s["index"], "start": s["start"], "end": s["end"],
             "source": s.get("source", ""),
+            "no_translate": bool(s.get("no_translate")),
         })
         if s.get("target"):
             job.emit({"type": "translated", "index": s["index"], "target": s["target"]})
@@ -301,9 +330,10 @@ def _run_parallel(
     worker = threading.Thread(target=_translate_worker, args=(job, q, state), daemon=True)
     worker.start()
 
-    # 续接时：把已恢复但未译的段先入队
+    # 续接时：把已恢复、需翻译的段先入队（中文段跳过）
     for s in job.segments:
-        if not s.get("target"):
+        _mark_segment_lang(s)
+        if not s.get("target") and not s.get("no_translate"):
             q.put(s["index"])
 
     if not transcribe_complete:
@@ -324,17 +354,19 @@ def _run_parallel(
         ):
             index = len(job.segments)
             seg = {"index": index, "start": start, "end": end, "source": text, "target": ""}
+            _mark_segment_lang(seg)
             job.segments.append(seg)
             store.append_segment(job.id, seg)
             job.emit({"type": "segment", "index": index, "start": start, "end": end,
-                      "source": text})
-            q.put(index)
+                      "source": text, "no_translate": bool(seg.get("no_translate"))})
+            if not seg.get("no_translate"):
+                q.put(index)
 
         store.save_progress(job.id, transcribe_complete=True)
 
     # 续接且转录已完成：补发进度，避免前端误显示「分析音频」
     if transcribe_complete and job.segments:
-        trans_done = sum(1 for s in job.segments if s.get("target"))
+        trans_done = _translate_done_count(job.segments)
         job.emit({
             "type": "progress", "phase": "transcribe",
             "done": len(job.segments), "total": len(job.segments),
@@ -379,8 +411,155 @@ def _derive_title(job: Job) -> str:
     return stem or "video"
 
 
+# ── 文本来源（网页 / txt / md / pdf）：抽取正文 → 切段 → 翻译 ──────────────────
+
+def _derive_text_title(job: Job) -> str:
+    if job.title:
+        return job.title
+    if job.source_type in ("doc", "doc_upload"):
+        stem = Path(job.url).stem
+        return stem or "document"
+    return job.url or "document"
+
+
+def _emit_text_segments(job: Job) -> None:
+    for s in job.segments:
+        job.emit({
+            "type": "segment",
+            "index": s["index"], "start": s["start"], "end": s["end"],
+            "source": s.get("source", ""), "kind": s.get("kind", "p"),
+            "no_translate": bool(s.get("no_translate")),
+        })
+        if s.get("target"):
+            job.emit({"type": "translated", "index": s["index"], "target": s["target"]})
+
+
+def _translate_text_segments(job: Job) -> None:
+    """逐段翻译：仅翻非中文段（中文段已标 no_translate），统一译成中文。"""
+    targets = [
+        s["index"] for s in job.segments
+        if s.get("source") and not s.get("no_translate")
+    ]
+    if not targets:
+        return  # 全中文 / 无可译内容
+
+    try:
+        from .model_config import require_text
+        params = require_text("translate")
+    except Exception as e:
+        job.emit({"type": "error", "message": f"未配置翻译模型：{e}"})
+        return
+
+    _set_status(job, "translating")
+    total = len(job.segments)
+    for start in range(0, len(targets), TRANSLATE_BATCH):
+        chunk = targets[start:start + TRANSLATE_BATCH]
+        lines = [job.segments[i]["source"] for i in chunk]
+        try:
+            translated = translator._translate_batch(
+                lines, "zh", params.model, params.base_url, params.api_key,
+                temperature=params.temperature, max_tokens=params.max_tokens,
+            )
+        except Exception as e:  # noqa: BLE001
+            job.emit({"type": "error", "message": f"批次翻译失败：{type(e).__name__}: {e}"})
+            translated = ["" for _ in lines]
+        for i, tr in zip(chunk, translated):
+            if tr:
+                job.segments[i]["target"] = tr
+                store.append_translation(job.id, i, tr)
+                job.emit({"type": "translated", "index": i, "target": tr})
+        done = _translate_done_count(job.segments)
+        job.emit({"type": "progress", "phase": "translate", "done": done, "total": total})
+
+
+def _replay_text(job: Job, cached: dict) -> None:
+    """命中 .vtjob.json（文本来源）：直接回放完整阅读结果。"""
+    job.content_kind = "text"
+    job.duration = 0.0
+    job.src_lang = cached.get("src_lang") or ""
+    job.title = cached.get("title") or ""
+    job.segments = list(cached.get("segments") or [])
+    _ensure_segments_lang(job.segments)
+
+    job.emit({
+        "type": "ready", "duration": 0.0, "video_url": "",
+        "title": job.title, "content_kind": "text", "cached": True,
+    })
+    if job.src_lang:
+        job.emit({"type": "lang", "src_lang": job.src_lang})
+    _emit_text_segments(job)
+    _set_status(job, "done")
+    job.emit({"type": "done"})
+    job.finish()
+
+
+def _run_text(job: Job) -> None:
+    job.content_kind = "text"
+
+    cached = load_result(job.id)
+    if cached and cached.get("content_kind") == "text":
+        _replay_text(job, cached)
+        return
+
+    _set_status(job, "fetching")
+    if job.source_type == "web":
+        title, blocks = extractor.extract_url(
+            job.url, fallback_proxy=get_download_fallback_proxy()
+        )
+    else:
+        title, blocks = extractor.extract_file(job.url)
+    if not blocks:
+        raise RuntimeError("未能从来源中提取到可学习的正文")
+
+    _set_status(job, "extracting")
+    job.title = job.title or title or _derive_text_title(job)
+    stem = f"{sanitize_filename(job.title) or 'doc'}.{job.id}"
+    store.register(
+        job.id, stem,
+        title=job.title, url=job.url, source_type=job.source_type, content_kind="text",
+    )
+
+    segs = segmenter.blocks_to_segments(blocks)
+    if not segs:
+        raise RuntimeError("正文切段后为空")
+    # 逐段语言检测：中文段标记为不翻译，仅非中文段译成中文（对混排文档更稳）。
+    for s in segs:
+        _mark_segment_lang(s)
+    job.segments = segs
+    job.duration = 0.0
+    # 文档语种元信息：多数段为中文则记为 zh，否则 en（仅供入库/展示）
+    zh_cnt = sum(1 for s in segs if s.get("no_translate"))
+    job.src_lang = "zh" if zh_cnt * 2 >= len(segs) else "en"
+
+    _set_status(job, "ready")
+    job.emit({
+        "type": "ready", "duration": 0.0, "video_url": "",
+        "title": job.title, "content_kind": "text",
+    })
+    if job.src_lang:
+        job.emit({"type": "lang", "src_lang": job.src_lang})
+    _emit_text_segments(job)
+
+    _translate_text_segments(job)
+    _finalize_text(job)
+
+
+def _finalize_text(job: Job) -> None:
+    if not job.src_lang:
+        text = " ".join(s.get("source", "") for s in job.segments)
+        job.src_lang = detect_lang(text) if text.strip() else ""
+    save_result(job)
+    _set_status(job, "done")
+    job.emit({"type": "done"})
+    job.finish()
+
+
 def _run(job: Job) -> None:
     try:
+        if is_text_source(job.source_type):
+            _run_text(job)
+            return
+
         # 按 job_id 解析既有产物（命中缓存 / 续接都依赖文件名 stem 解析）
         out_file = store.media_file(job.id)
 

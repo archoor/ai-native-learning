@@ -70,13 +70,14 @@
     }
     if (view === "target") {
       if (tgt) return escapeHtml(tgt);
+      if (seg.no_translate) return escapeHtml(src);
       return `<span class="seg-pending">${lt("learnTranslating")}</span>`;
     }
     // both
     let html = applyHighlights(src, highlightMap()[seg.index]?.highlights);
     if (tgt) {
       html += `<span class="seg-target">${escapeHtml(tgt)}</span>`;
-    } else if (src) {
+    } else if (src && !seg.no_translate) {
       html += `<span class="seg-pending">${lt("learnTranslating")}</span>`;
     }
     return html;
@@ -303,7 +304,10 @@
       const data = await res.json();
       if (data.goal) { panel.goal = data.goal; $("learnGoal").value = data.goal; }
       if (data.outline) { panel.outline = data.outline; panel.outlineRequested = true; }
-      if (data.highlights) panel.highlights = data.highlights;
+      if (data.highlights) {
+        panel.highlights = data.highlights;
+        if (window.Reader) window.Reader.applyHighlights(panel.highlights);
+      }
       if (data.questions) panel.questions = data.questions;
       if (data.quiz_grades) panel.quizGrades = data.quiz_grades;
       if (data.quiz_chats) panel.quizChats = data.quiz_chats;
@@ -393,10 +397,12 @@
           } else if (ev.type === "batch" && ev.highlights) {
             panel.highlights = ev.highlights;
             renderTranscript();
+            if (window.Reader) window.Reader.applyHighlights(panel.highlights);
             setHighlightProgress(ev.done || 0, ev.total || 1, lt("learnHlProgress", { done: ev.done, total: ev.total }));
           } else if (ev.type === "done") {
             panel.highlights = ev.highlights;
             renderTranscript();
+            if (window.Reader) window.Reader.applyHighlights(panel.highlights);
             setHighlightProgress(ev.total, ev.total, lt("learnHlDone"));
             toast(lt("learnToastHlDone"));
           } else if (ev.type === "error") {

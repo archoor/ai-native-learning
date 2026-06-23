@@ -37,6 +37,30 @@ def _save_raw(items: list[dict[str, Any]]) -> None:
     p.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _position_sec(it: dict[str, Any]) -> float | None:
+    raw = it.get("position_sec")
+    if raw is None:
+        return None
+    try:
+        pos = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, pos), 2)
+
+
+def _entry(it: dict[str, Any]) -> dict[str, Any]:
+    src = str(it.get("source") or "").strip()
+    row: dict[str, Any] = {
+        "source": src,
+        "name": str(it.get("name") or src),
+        "opened_at": int(it.get("opened_at") or 0),
+    }
+    pos = _position_sec(it)
+    if pos is not None and pos > 0:
+        row["position_sec"] = pos
+    return row
+
+
 def _normalize(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """按 opened_at 倒序，去重 source，截断至 HISTORY_MAX。"""
     seen: set[str] = set()
@@ -46,11 +70,7 @@ def _normalize(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not src or src in seen:
             continue
         seen.add(src)
-        out.append({
-            "source": src,
-            "name": str(it.get("name") or src),
-            "opened_at": int(it.get("opened_at") or 0),
-        })
+        out.append(_entry(it))
         if len(out) >= HISTORY_MAX:
             break
     return out
@@ -67,8 +87,45 @@ def push_history(source: str, name: str = "") -> list[dict[str, Any]]:
         return list_history()
     now = int(time.time() * 1000)
     with _lock:
-        items = [x for x in _load_raw() if x.get("source") != src]
-        items.append({"source": src, "name": name or src, "opened_at": now})
+        raw = _load_raw()
+        prev = next((x for x in raw if x.get("source") == src), None)
+        items = [x for x in raw if x.get("source") != src]
+        row: dict[str, Any] = {"source": src, "name": name or src, "opened_at": now}
+        if prev and _position_sec(prev) is not None:
+            row["position_sec"] = _position_sec(prev)
+        items.append(row)
+        normalized = _normalize(items)
+        _save_raw(normalized)
+        return normalized
+
+
+def update_position(source: str, position_sec: float) -> list[dict[str, Any]]:
+    """更新某 source 的播放进度（秒）；未在历史中则追加一条。"""
+    src = (source or "").strip()
+    if not src:
+        return list_history()
+    try:
+        pos = round(max(0.0, float(position_sec)), 2)
+    except (TypeError, ValueError):
+        return list_history()
+    with _lock:
+        items = _load_raw()
+        found = False
+        for it in items:
+            if it.get("source") == src:
+                if pos > 0:
+                    it["position_sec"] = pos
+                else:
+                    it.pop("position_sec", None)
+                found = True
+                break
+        if not found and pos > 0:
+            items.append({
+                "source": src,
+                "name": src,
+                "opened_at": int(time.time() * 1000),
+                "position_sec": pos,
+            })
         normalized = _normalize(items)
         _save_raw(normalized)
         return normalized
