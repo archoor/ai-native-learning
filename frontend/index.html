@@ -18,9 +18,9 @@
       <form class="url-area" id="urlForm">
         <input type="text" id="urlInput" data-i18n-placeholder="urlPlaceholder"
           data-i18n-title="urlTitle"
-          placeholder="视频/网页链接，或本地文件路径（视频/音频/txt/md/pdf）"
+          placeholder="视频/网页链接，或本地文件路径（视频/音频/txt/md/pdf/jpg/png）"
           autocomplete="off" spellcheck="false" />
-        <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flv,.ts,.txt,.md,.markdown,.pdf" hidden />
+        <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.flv,.ts,.txt,.md,.markdown,.pdf,.jpg,.jpeg,.png" hidden />
         <button class="btn" id="pickBtn" type="button" data-i18n="pickFile" data-i18n-title="pickFileTitle">选择文件</button>
         <button class="btn primary" id="loadBtn" type="submit" data-i18n="load">加载</button>
       </form>
@@ -117,6 +117,31 @@
               <div class="rl-text" id="readerLoadingText"></div>
             </div>
             <article class="reader-article" id="readerArticle"></article>
+          </div>
+        </div>
+
+        <div class="image-wrap" id="imageWrap" hidden>
+          <div class="reader-head">
+            <div class="reader-title" id="imageTitle"></div>
+            <div class="reader-meta" id="imageMeta"></div>
+          </div>
+          <div class="image-body" id="imageBody">
+            <div class="reader-loading" id="imageLoading" hidden>
+              <div class="rl-spinner"></div>
+              <div class="rl-text" id="imageLoadingText"></div>
+            </div>
+            <div class="img-stage" id="imgStage">
+              <img id="ocrImage" alt="" draggable="false" />
+            </div>
+            <div class="img-toolbar">
+              <span class="img-hint" id="imgHint" data-i18n="imageHint">点击右侧「全文」文字，可在原图上高亮对应位置</span>
+              <span class="spacer"></span>
+              <button class="btn sm" id="imgZoomBtn" type="button" data-i18n="imageZoom">查看大图 ↗</button>
+            </div>
+          </div>
+          <div class="lightbox" id="imgLightbox" hidden>
+            <button class="lb-close" id="imgLbClose" type="button" aria-label="Close">✕</button>
+            <img id="imgLbImg" alt="" />
           </div>
         </div>
       </div>
@@ -397,6 +422,7 @@
   </script>
   <script src="/app.js"></script>
   <script src="/reader.js"></script>
+  <script src="/image-viewer.js"></script>
   <script src="/learning-panel.js"></script>
 </body>
 

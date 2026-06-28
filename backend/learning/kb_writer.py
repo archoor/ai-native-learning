@@ -26,11 +26,48 @@ def _fmt_time(sec: float) -> str:
     return f"{sec // 60:02d}:{sec % 60:02d}"
 
 
+def _is_doc_kind(content_kind: str) -> bool:
+    return content_kind in ("text", "image")
+
+
+def _seg_label(seg: dict, content_kind: str) -> str:
+    if _is_doc_kind(content_kind):
+        return f"§{int(seg.get('index', seg.get('start', 0))) + 1}"
+    return _fmt_time(seg.get("start", 0))
+
+
+def _seg_range_label(start: float, end: float, content_kind: str) -> str:
+    if _is_doc_kind(content_kind):
+        a = int(start) + 1
+        b = max(int(end - 1e-6), a)
+        if a == b:
+            return f"§{a}"
+        return f"§{a}–§{b}"
+    return f"{_fmt_time(start)}–{_fmt_time(end)}"
+
+
+def _translation_line(seg: dict) -> str | None:
+    if seg.get("no_translate"):
+        return None
+    target = (seg.get("target") or "").strip()
+    if not target:
+        return None
+    source = (seg.get("source") or "").strip()
+    if target == source:
+        return None
+    return f"> {target}"
+
+
 def _rel_label(r: int) -> str:
     return {2: "🔴 高", 1: "🟡 中", 0: "⚪ 低"}.get(r, "⚪ 低")
 
 
-def persist_session(sess: LearningSession, segments: list[dict]) -> dict[str, str]:
+def persist_session(
+    sess: LearningSession,
+    segments: list[dict],
+    *,
+    content_kind: str = "video",
+) -> dict[str, str]:
     """写入 workspace，返回相对路径映射。"""
     ws = _workspace()
     title = safe_dir_name(sess.title)
@@ -50,6 +87,7 @@ def persist_session(sess: LearningSession, segments: list[dict]) -> dict[str, st
     raw_lines = [
         "---",
         "type: transcript",
+        f"content_kind: {content_kind}",
         f"source_file: ai_native_learning job {sess.job_id}",
         f"processed: {today}",
         "---",
@@ -59,7 +97,10 @@ def persist_session(sess: LearningSession, segments: list[dict]) -> dict[str, st
     ]
     for seg in segments:
         if seg and seg.get("source"):
-            raw_lines.append(f"**{_fmt_time(seg.get('start', 0))}** {seg['source']}")
+            raw_lines.append(f"**{_seg_label(seg, content_kind)}** {seg['source']}")
+            tr = _translation_line(seg)
+            if tr:
+                raw_lines.append(tr)
             raw_lines.append("")
     raw_path.write_text("\n".join(raw_lines), encoding="utf-8")
     paths["transcript"] = str(raw_path.relative_to(project_root()))
@@ -88,13 +129,15 @@ def persist_session(sess: LearningSession, segments: list[dict]) -> dict[str, st
     ]
     for i, s in enumerate(sk, 1):
         lines01.append(f"{i}. {s}")
-    lines01 += ["```", "", "## 信息地图", "", "| 时间戳 | 讲什么 | 相关度 |", "|---|---|---|"]
+    map_col = "段落" if _is_doc_kind(content_kind) else "时间戳"
+    lines01 += ["```", "", "## 信息地图", "", f"| {map_col} | 讲什么 | 相关度 |", "|---|---|---|"]
     for row in mp:
         start = row.get("start_sec", row.get("start", 0))
-        end = row.get("end_sec", row.get("end", start + 60))
+        end = row.get("end_sec", row.get("end", start + (1 if _is_doc_kind(content_kind) else 60)))
         rel = row.get("relevance", 0)
         lines01.append(
-            f"| {_fmt_time(start)}–{_fmt_time(end)} | {row.get('summary', '')} | {_rel_label(rel)} |"
+            f"| {_seg_range_label(float(start), float(end), content_kind)} "
+            f"| {row.get('summary', '')} | {_rel_label(rel)} |"
         )
     lines01 += ["", "## 相关", "", f"- {transcript_link}"]
     p01.write_text("\n".join(lines01), encoding="utf-8")

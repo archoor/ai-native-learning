@@ -429,7 +429,9 @@ def post_persist(job_id: str) -> JSONResponse:
     if not sess.goal:
         return JSONResponse({"error": "请先完成学习目标与自测"}, status_code=422)
     try:
-        paths = kb_writer.persist_session(sess, segs_or_resp)
+        paths = kb_writer.persist_session(
+            sess, segs_or_resp, content_kind=getattr(job, "content_kind", "video") or "video"
+        )
     except Exception as e:
         return JSONResponse({"error": f"入库失败：{e}"}, status_code=500)
 

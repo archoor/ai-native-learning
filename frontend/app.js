@@ -12,7 +12,7 @@ const state = {
   srcLang: "",
   title: "",
   duration: 0,
-  contentKind: "video", // 'video' | 'text'：决定显示播放器还是阅读器
+  contentKind: "video", // 'video' | 'text' | 'image'：决定显示播放器/阅读器/原图视图
   segs: [],          // [{index,start,end,source,target,kind?}]
   llm: false,
   progress: {        // 各阶段进度
@@ -550,6 +550,7 @@ function resetForNewJob() {
   hideProcessing();
   hideSubtitleBar();
   if (window.Reader) Reader.hide();
+  if (window.ImageViewer) ImageViewer.hide();
   $("playerWrap").hidden = true;
   setPlaceholder(true);
   $("capSource").textContent = "";
@@ -574,14 +575,64 @@ function applySnapshot(data) {
     syncProgressFromSegments();
   }
   if (data.video_url) setVideoSource(data.video_url);
+  if (data.image_url && window.ImageViewer) ImageViewer.setImage(data.image_url);
   renderStatus();
   updateMeta();
   notifyLearningPanel();
 }
 
 function setContentKind(kind) {
-  state.contentKind = kind === "text" ? "text" : "video";
+  state.contentKind = kind === "text" ? "text" : (kind === "image" ? "image" : "video");
   document.body.dataset.content = state.contentKind;
+}
+
+// 图片 OCR：bbox 框依赖 segments 成批到达，用 rAF 合并重绘。
+let imageRenderScheduled = false;
+function scheduleImageRender() {
+  if (state.contentKind !== "image" || !window.ImageViewer) return;
+  if (imageRenderScheduled) return;
+  imageRenderScheduled = true;
+  requestAnimationFrame(() => {
+    imageRenderScheduled = false;
+    ImageViewer.setSegments(state.segs);
+  });
+}
+
+/** 图片来源（原图 + OCR）的状态渲染。 */
+function renderImageStatus() {
+  if (window.ImageViewer) ImageViewer.show();
+  $("playerWrap").hidden = true;
+  if (window.Reader) Reader.hide();
+  hideProcessing();
+  hideSubtitleBar();
+  setPlaceholder(false);
+  switch (state.status) {
+    case "queued":
+    case "fetching":
+      hideBanner();
+      if (window.ImageViewer) ImageViewer.setLoading(tr("ocrReading"));
+      break;
+    case "extracting":
+      // 原图已下发，OCR 进行中：用半透明小条提示，不遮挡图片
+      hideBanner();
+      if (window.ImageViewer) ImageViewer.setLoading(tr("ocrRecognizing"), true);
+      break;
+    case "ready":
+    case "translating":
+    case "done":
+      hideBanner();
+      if (window.ImageViewer) {
+        ImageViewer.clearLoading();
+        ImageViewer.setTitle(state.title);
+        ImageViewer.setSegments(state.segs);
+      }
+      break;
+    case "error":
+      setStatusDot("error");
+      break;
+    default:
+      break;
+  }
 }
 
 // 文本事件成批到达（分段、批量译文）；用 rAF 合并，避免每条事件都整篇重渲染。
@@ -683,8 +734,17 @@ function handleEvent(msg) {
         if (lastSource) pushHistory(lastSource, msg.title);
       }
       if (msg.video_url) setVideoSource(msg.video_url);
+      if (msg.image_url && window.ImageViewer) ImageViewer.setImage(msg.image_url);
       renderStatus();
       updateMeta();
+      break;
+    case "image":
+      // 早发原图：OCR/翻译完成前即让用户看到图片
+      if (msg.image_url && window.ImageViewer) {
+        setContentKind("image");
+        ImageViewer.setImage(msg.image_url);
+        ImageViewer.setTitle(state.title);
+      }
       break;
     case "lang":
       state.srcLang = msg.src_lang || "";
@@ -696,11 +756,13 @@ function handleEvent(msg) {
         source: msg.source || "", target: (state.segs[i] && state.segs[i].target) || "",
         kind: msg.kind || (state.segs[i] && state.segs[i].kind) || "p",
         no_translate: !!msg.no_translate,
+        bbox: msg.bbox || (state.segs[i] && state.segs[i].bbox) || null,
       };
       syncProgressFromSegments();
       renderStatus();
       updateMeta();
-      if (state.contentKind !== "text") refreshCaption();
+      if (state.contentKind === "video") refreshCaption();
+      if (state.contentKind === "image") scheduleImageRender();
       notifyLearningPanel();
       break;
     }
@@ -709,7 +771,7 @@ function handleEvent(msg) {
       if (state.segs[i]) state.segs[i].target = msg.target || "";
       syncProgressFromSegments();
       renderStatus();
-      if (state.contentKind !== "text") refreshCaption();
+      if (state.contentKind === "video") refreshCaption();
       notifyLearningPanel();
       break;
     }
@@ -783,6 +845,7 @@ function readySeconds() {
 let doneHideTimer = null;
 function renderStatus() {
   if (doneHideTimer) { clearTimeout(doneHideTimer); doneHideTimer = null; }
+  if (state.contentKind === "image") { renderImageStatus(); return; }
   if (state.contentKind === "text") { renderTextStatus(); return; }
   const p = state.progress;
   switch (state.status) {
@@ -1420,6 +1483,11 @@ document.addEventListener("keydown", (e) => {
 window.LearnBridge = {
   seek(t) {
     if (isNaN(t)) return;
+    // 图片来源：把"时间"当作段落序号，在原图上高亮对应文字框
+    if (state.contentKind === "image") {
+      if (window.ImageViewer) ImageViewer.locate(t);
+      return;
+    }
     // 文本来源：把"时间"当作段落序号，滚动定位阅读器对应段落
     if (state.contentKind === "text") {
       if (window.Reader) Reader.scrollToIndex(t);

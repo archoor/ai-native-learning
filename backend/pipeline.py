@@ -44,7 +44,7 @@ from subtitle_player.backend.parser import detect_lang  # noqa: E402
 
 from . import store  # noqa: E402
 from .content import extractor, segmenter  # noqa: E402
-from .jobs import Job, is_text_source, load_result, save_result  # noqa: E402
+from .jobs import Job, is_image_source, is_text_source, load_result, save_result  # noqa: E402
 from .live_transcribe import transcribe_segments  # noqa: E402
 from .model_config import get_download_fallback_proxy  # noqa: E402
 from .paths import media_dir  # noqa: E402
@@ -416,20 +416,61 @@ def _derive_title(job: Job) -> str:
 def _derive_text_title(job: Job) -> str:
     if job.title:
         return job.title
-    if job.source_type in ("doc", "doc_upload"):
+    if job.source_type in ("doc", "doc_upload", "image", "image_upload"):
         stem = Path(job.url).stem
         return stem or "document"
     return job.url or "document"
 
 
+def _ensure_local_image(job: Job) -> str:
+    """图片来源 → 返回本地原图绝对路径（图片直链则先下载到 uploads）。"""
+    if job.source_type in ("image", "image_upload"):
+        p = Path(job.url)
+        if not p.exists():
+            raise RuntimeError(f"图片文件不存在：{p}")
+        return str(p)
+
+    # image_url：下载到 uploads（命名带 job_id，供缓存复用与 /api/image 服务）
+    import requests
+    from urllib.parse import urlparse
+
+    uploads = media_dir() / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    ext = Path(urlparse(job.url).path).suffix.lower() or ".png"
+    dest = uploads / f"img_{job.id}{ext}"
+    if not dest.exists():
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        proxy = get_download_fallback_proxy()
+
+        def _get(proxies):
+            r = requests.get(job.url, headers=headers, timeout=30, proxies=proxies)
+            r.raise_for_status()
+            return r.content
+
+        try:
+            content = _get(None)
+        except Exception:
+            if proxy:
+                content = _get({"http": proxy, "https": proxy})
+            else:
+                raise
+        if not content:
+            raise RuntimeError("图片下载为空")
+        dest.write_bytes(content)
+    return str(dest)
+
+
 def _emit_text_segments(job: Job) -> None:
     for s in job.segments:
-        job.emit({
+        ev = {
             "type": "segment",
             "index": s["index"], "start": s["start"], "end": s["end"],
             "source": s.get("source", ""), "kind": s.get("kind", "p"),
             "no_translate": bool(s.get("no_translate")),
-        })
+        }
+        if s.get("bbox") is not None:
+            ev["bbox"] = s["bbox"]
+        job.emit(ev)
         if s.get("target"):
             job.emit({"type": "translated", "index": s["index"], "target": s["target"]})
 
@@ -473,18 +514,31 @@ def _translate_text_segments(job: Job) -> None:
 
 
 def _replay_text(job: Job, cached: dict) -> None:
-    """命中 .vtjob.json（文本来源）：直接回放完整阅读结果。"""
-    job.content_kind = "text"
+    """命中 .vtjob.json（文本/图片来源）：直接回放完整结果。"""
+    job.content_kind = cached.get("content_kind") or "text"
     job.duration = 0.0
     job.src_lang = cached.get("src_lang") or ""
     job.title = cached.get("title") or ""
     job.segments = list(cached.get("segments") or [])
     _ensure_segments_lang(job.segments)
 
-    job.emit({
+    ready = {
         "type": "ready", "duration": 0.0, "video_url": "",
-        "title": job.title, "content_kind": "text", "cached": True,
-    })
+        "title": job.title, "content_kind": job.content_kind, "cached": True,
+    }
+    if job.content_kind == "image":
+        ip = cached.get("image_path") or ""
+        if ip and Path(ip).exists():
+            job.image_path = ip
+        elif job.source_type in ("image", "image_upload") and Path(job.url).exists():
+            job.image_path = job.url
+        else:
+            try:
+                job.image_path = _ensure_local_image(job)
+            except Exception:
+                job.image_path = ""
+        ready["image_url"] = f"/api/image/{job.id}"
+    job.emit(ready)
     if job.src_lang:
         job.emit({"type": "lang", "src_lang": job.src_lang})
     _emit_text_segments(job)
@@ -494,15 +548,23 @@ def _replay_text(job: Job, cached: dict) -> None:
 
 
 def _run_text(job: Job) -> None:
-    job.content_kind = "text"
+    is_img = is_image_source(job.source_type)
+    job.content_kind = "image" if is_img else "text"
 
     cached = load_result(job.id)
-    if cached and cached.get("content_kind") == "text":
+    if cached and cached.get("content_kind") in ("text", "image"):
         _replay_text(job, cached)
         return
 
     _set_status(job, "fetching")
-    if job.source_type == "web":
+    if is_img:
+        local = _ensure_local_image(job)
+        job.image_path = local
+        # 先把原图下发给前端立即展示，再后台跑 OCR + 翻译
+        job.emit({"type": "image", "image_url": f"/api/image/{job.id}"})
+        _set_status(job, "extracting")  # OCR 较慢，提前进入"识别中"
+        title, blocks = extractor.extract_image(local)
+    elif job.source_type == "web":
         title, blocks = extractor.extract_url(
             job.url, fallback_proxy=get_download_fallback_proxy()
         )
@@ -511,15 +573,18 @@ def _run_text(job: Job) -> None:
     if not blocks:
         raise RuntimeError("未能从来源中提取到可学习的正文")
 
-    _set_status(job, "extracting")
+    if not is_img:
+        _set_status(job, "extracting")
     job.title = job.title or title or _derive_text_title(job)
-    stem = f"{sanitize_filename(job.title) or 'doc'}.{job.id}"
+    stem = f"{sanitize_filename(job.title) or ('image' if is_img else 'doc')}.{job.id}"
     store.register(
         job.id, stem,
-        title=job.title, url=job.url, source_type=job.source_type, content_kind="text",
+        title=job.title, url=job.url, source_type=job.source_type,
+        content_kind=job.content_kind,
     )
 
-    segs = segmenter.blocks_to_segments(blocks)
+    # 图片来源：禁用去重，保证每个 segment 与原图上的框严格一一对应
+    segs = segmenter.blocks_to_segments(blocks, dedupe=not is_img)
     if not segs:
         raise RuntimeError("正文切段后为空")
     # 逐段语言检测：中文段标记为不翻译，仅非中文段译成中文（对混排文档更稳）。
@@ -532,10 +597,13 @@ def _run_text(job: Job) -> None:
     job.src_lang = "zh" if zh_cnt * 2 >= len(segs) else "en"
 
     _set_status(job, "ready")
-    job.emit({
+    ready = {
         "type": "ready", "duration": 0.0, "video_url": "",
-        "title": job.title, "content_kind": "text",
-    })
+        "title": job.title, "content_kind": job.content_kind,
+    }
+    if is_img:
+        ready["image_url"] = f"/api/image/{job.id}"
+    job.emit(ready)
     if job.src_lang:
         job.emit({"type": "lang", "src_lang": job.src_lang})
     _emit_text_segments(job)

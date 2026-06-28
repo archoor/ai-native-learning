@@ -43,30 +43,41 @@ def _split_long(text: str, max_chars: int) -> list[str]:
     return final or [text[:max_chars]]
 
 
-def blocks_to_segments(blocks: list[dict], max_chars: int = MAX_SEG_CHARS) -> list[dict]:
+def blocks_to_segments(
+    blocks: list[dict], max_chars: int = MAX_SEG_CHARS, dedupe: bool = True
+) -> list[dict]:
+    """
+    dedupe：网页/文档抽取器常把长段落重复输出，默认去重。
+            图片 OCR 需 segment 与原图框严格一一对应，调用方传 dedupe=False。
+    """
     segs: list[dict] = []
     idx = 0
-    seen: set[str] = set()  # 去重：部分抽取器会把长段落重复输出
+    seen: set[str] = set()
     for b in blocks:
         text = (b.get("text") or "").strip()
         if not text:
             continue
         # 仅对较长文本去重，避免误删合法的短重复（如列表项"是/否"）
-        if len(text) > 40:
+        if dedupe and len(text) > 40:
             if text in seen:
                 continue
             seen.add(text)
         kind = b.get("kind", "p")
+        bbox = b.get("bbox")  # 图片来源：归一化 [x,y,w,h]，供前端原图定位；其它来源为 None
         # 代码块不二次切分（保持完整可读）
         chunks = [text] if kind == "code" else _split_long(text, max_chars)
         for chunk in chunks:
-            segs.append({
+            seg = {
                 "index": idx,
                 "start": float(idx),
                 "end": float(idx + 1),
                 "source": chunk,
                 "target": "",
                 "kind": kind,
-            })
+            }
+            if bbox is not None:
+                # 同一块被二次切分时，各 chunk 共享该块的包围框（定位到整段位置）
+                seg["bbox"] = bbox
+            segs.append(seg)
             idx += 1
     return segs

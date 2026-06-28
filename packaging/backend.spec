@@ -14,11 +14,24 @@ PyInstaller 配置：把 AI原生学习后端（FastAPI + uvicorn）打成独立
 
 import os
 
+from PyInstaller.utils.hooks import collect_all
+
 PROJECT_ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
 datas = [
     (os.path.join(PROJECT_ROOT, "ai_native_learning", "frontend"), "frontend"),
 ]
+
+binaries = []
+
+# 图片 OCR：RapidOCR 的 .onnx 模型与 config.yaml 等是数据文件，
+# PyInstaller 不会随 import 自动带入，需显式收集（含 binaries / hiddenimports）。
+for _pkg in ("rapidocr_onnxruntime", "shapely", "pyclipper"):
+    _d, _b, _h = collect_all(_pkg)
+    datas += _d
+    binaries += _b
+    globals().setdefault("_ocr_hidden", [])
+    _ocr_hidden += _h
 
 hiddenimports = [
     # ai_native_learning 后端
@@ -34,6 +47,7 @@ hiddenimports = [
     "ai_native_learning.backend.content",
     "ai_native_learning.backend.content.extractor",
     "ai_native_learning.backend.content.segmenter",
+    "ai_native_learning.backend.content.ocr",
     "ai_native_learning.backend.learning",
     "ai_native_learning.backend.learning.routes",
     "ai_native_learning.backend.learning.session",
@@ -48,6 +62,9 @@ hiddenimports = [
     "scripts.lib.content_common",
     "subtitle_player.backend.parser",
     "subtitle_player.backend.translator",
+    # 图片 OCR
+    "rapidocr_onnxruntime",
+    "cv2",
     # 网页/文本抽取
     "trafilatura",
     "trafilatura.settings",
@@ -77,10 +94,13 @@ hiddenimports = [
     "uvicorn.lifespan.off",
 ]
 
+# 合入 OCR 相关包 collect_all 探测到的隐藏子模块
+hiddenimports += globals().get("_ocr_hidden", [])
+
 a = Analysis(
     [os.path.join(PROJECT_ROOT, "ai_native_learning", "run.py")],
     pathex=[PROJECT_ROOT],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

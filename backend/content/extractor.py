@@ -3,10 +3,13 @@
 
 对外：
 - TEXT_EXTS                可作为文本学习资料的扩展名集合
+- IMAGE_EXTS               可作 OCR 学习的图片扩展名集合
 - is_video_url(url)        URL 是否指向已知视频站（决定走视频还是文章流程）
 - is_text_file(path)       本地路径是否为受支持的文本文件
+- is_image_file(path)      本地路径是否为受支持的图片文件
 - extract_url(url, ...)    抓取网页 → (title, blocks)
 - extract_file(path)       读取本地文件 → (title, blocks)
+- extract_image(path)      图片 OCR → (title, blocks)（blocks 带归一化 bbox）
 
 block 结构：{"text": str, "kind": "h1|h2|h3|p|li|quote|code"}，供 segmenter 切段、
 前端阅读器按结构渲染。抽取库（trafilatura / pymupdf）按需延迟导入，缺失时给出可读报错。
@@ -19,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 TEXT_EXTS = {".txt", ".md", ".markdown", ".pdf"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 # 已知视频/音频站点：命中则按视频流程（yt-dlp 下载转录），否则按网页文章抽取正文。
 _VIDEO_HOSTS = (
@@ -48,6 +52,18 @@ def is_video_url(url: str) -> bool:
 
 def is_text_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in TEXT_EXTS
+
+
+def is_image_file(path: str | Path) -> bool:
+    return Path(path).suffix.lower() in IMAGE_EXTS
+
+
+# ── 图片（OCR）──────────────────────────────────────────────────────────────────
+
+def extract_image(path: str | Path) -> tuple[str, list[dict]]:
+    """图片 → OCR → (title, blocks)。blocks 含归一化 bbox，供前端在原图上定位。"""
+    from . import ocr
+    return ocr.image_to_blocks(path)
 
 
 # ── 网页 ──────────────────────────────────────────────────────────────────────
