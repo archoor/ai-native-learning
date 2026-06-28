@@ -143,6 +143,13 @@
     if (btn) btn.style.display = isMap ? "" : "none";
   }
 
+  /** 视频用时间戳；文本/图片来源用段落序号（start 即段索引）。 */
+  function segLabel(s) {
+    const kind = (window.LearnBridge && window.LearnBridge.contentKind) || "video";
+    if (kind === "video") return fmt(s.start);
+    return String(Math.round(s.start) + 1).padStart(2, "0");
+  }
+
   function renderTranscript() {
     const box = $("learnTranscript");
     if (!box || !panel.segs.length) { if (box) box.innerHTML = ""; return; }
@@ -154,7 +161,7 @@
         const rel = hi.relevance != null ? hi.relevance : 0;
         const text = segmentDisplayHtml(s);
         return `<div class="learn-seg ${relClass(rel)}" data-rel="${rel}" data-start="${s.start}">`
-          + `<span class="t">${fmt(s.start)}</span><span>${text}</span></div>`;
+          + `<span class="t">${segLabel(s)}</span><span>${text}</span></div>`;
       })
       .join("");
     box.querySelectorAll(".learn-seg").forEach((el) => {
@@ -708,6 +715,18 @@
     setModelName(name) {
       const el = $("learnModel");
       if (el) el.textContent = name || "—";
+    },
+
+    /** 图片视图点击 bbox 框 → 高亮并滚动「全文」对应条目。 */
+    focusSegment(index) {
+      const box = $("learnTranscript");
+      if (!box) return;
+      const el = box.querySelector(`.learn-seg[data-start="${index}"]`);
+      if (!el) return;
+      box.querySelectorAll(".learn-seg.flash").forEach((x) => x.classList.remove("flash"));
+      el.classList.add("flash");
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      setTimeout(() => el.classList.remove("flash"), 1400);
     },
   };
 

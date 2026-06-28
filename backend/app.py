@@ -52,6 +52,8 @@ _MEDIA_EXTS = {
 }
 # 可处理的本地文本扩展名（网页文章 / txt / md / pdf 走文本学习流程）
 _TEXT_EXTS = extractor.TEXT_EXTS
+# 可处理的本地图片扩展名（jpg / png 走 OCR 学习流程）
+_IMAGE_EXTS = extractor.IMAGE_EXTS
 
 app = FastAPI(title="AI原生学习")
 app.include_router(learn_router)
@@ -116,6 +118,15 @@ def _stt_guard() -> JSONResponse | None:
     return None
 
 
+def _url_path_suffix(url: str) -> str:
+    """取 URL 路径部分的扩展名（小写），用于识别图片直链。"""
+    from urllib.parse import urlparse
+    try:
+        return Path(urlparse(url).path).suffix.lower()
+    except Exception:
+        return ""
+
+
 @app.post("/api/job")
 def submit_job(body: JobBody) -> JSONResponse:
     src = body.resolved()
@@ -131,6 +142,10 @@ def submit_job(body: JobBody) -> JSONResponse:
                 return guard
             key = jobs.canonical_url_key(src)
             job, _ = jobs.registry.get_or_create(key, src, source_type="url")
+        elif _url_path_suffix(src) in _IMAGE_EXTS:
+            # 图片直链：下载后 OCR 学习
+            key = jobs.canonical_url_key(src)
+            job, _ = jobs.registry.get_or_create(key, src, source_type="image_url")
         else:
             # 其余链接按网页文章抽取正文学习（不需转录）
             key = jobs.canonical_url_key(src)
@@ -149,11 +164,13 @@ def submit_job(body: JobBody) -> JSONResponse:
             job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="local")
         elif suffix in _TEXT_EXTS:
             job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="doc")
+        elif suffix in _IMAGE_EXTS:
+            job, _ = jobs.registry.get_or_create(key, str(p.resolve()), source_type="image")
         else:
             return JSONResponse(
                 {"error": f"不支持的文件类型「{p.suffix or '无扩展名'}」。"
                           f"视频/音频：.mp4/.mkv/.mov/.webm/.mp3/.m4a 等；"
-                          f"文本：.txt/.md/.pdf"},
+                          f"文本：.txt/.md/.pdf；图片：.jpg/.png"},
                 status_code=422,
             )
 
@@ -167,11 +184,13 @@ async def upload_job(file: UploadFile = File(...)) -> JSONResponse:
     orig_name = Path(file.filename or "upload.mp4").name
     suffix = Path(orig_name).suffix.lower()
     is_text = suffix in _TEXT_EXTS
-    if not is_text and suffix not in _MEDIA_EXTS:
+    is_image = suffix in _IMAGE_EXTS
+    is_doc = is_text or is_image  # 非媒体来源：无需转录模型
+    if not is_doc and suffix not in _MEDIA_EXTS:
         return JSONResponse(
             {"error": f"不支持的文件类型「{suffix}」"}, status_code=422
         )
-    if not is_text:
+    if not is_doc:
         guard = _stt_guard()
         if guard is not None:
             return guard
@@ -187,7 +206,12 @@ async def upload_job(file: UploadFile = File(...)) -> JSONResponse:
     if not dest.exists():
         dest.write_bytes(content)
 
-    source_type = "doc_upload" if is_text else "upload"
+    if is_image:
+        source_type = "image_upload"
+    elif is_text:
+        source_type = "doc_upload"
+    else:
+        source_type = "upload"
     job, _ = jobs.registry.get_or_create(key, str(dest.resolve()), source_type=source_type)
     job.title = Path(orig_name).stem
     pipeline.start_job(job)
@@ -236,6 +260,23 @@ def serve_video(job_id: str, request: Request) -> Response:
         return JSONResponse({"error": "视频文件丢失"}, status_code=404)
     # FileResponse 已支持 Range 请求（Accept-Ranges/206），满足 <video> 拖动 seek
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@app.get("/api/image/{job_id}")
+def serve_image(job_id: str) -> Response:
+    """服务图片来源的原图（供阅读器左侧展示与点击定位）。"""
+    job = jobs.registry.get(job_id)
+    if job is None:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    raw = job.image_path or (job.url if job.source_type in ("image", "image_upload") else "")
+    if not raw:
+        return JSONResponse({"error": "原图尚未就绪"}, status_code=404)
+    path = Path(raw)
+    if not path.exists():
+        return JSONResponse({"error": "原图文件丢失"}, status_code=404)
+    import mimetypes
+    media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.get("/api/models-config")
@@ -349,6 +390,11 @@ def learning_panel_js() -> FileResponse:
 @app.get("/reader.js")
 def reader_js() -> FileResponse:
     return FileResponse(_FRONTEND / "reader.js", media_type="application/javascript", headers=_NO_CACHE)
+
+
+@app.get("/image-viewer.js")
+def image_viewer_js() -> FileResponse:
+    return FileResponse(_FRONTEND / "image-viewer.js", media_type="application/javascript", headers=_NO_CACHE)
 
 
 @app.get("/i18n.js")

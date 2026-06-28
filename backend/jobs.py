@@ -27,13 +27,32 @@ def job_id_for(key: str) -> str:
     return hashlib.sha256(key.strip().encode("utf-8")).hexdigest()[:16]
 
 
-# 文本类来源（网页文章 / 本地或上传的 txt/md/pdf）：走「抽取正文 → 切段 → 翻译」流程，
-# 不下载、不转码、不转录。其余（url/local/upload）为视频/音频来源。
+# 文档类来源（网页文章 / 本地或上传的 txt/md/pdf）与图片来源（jpg/png OCR）：
+# 都走「抽取 → 切段 → 翻译」流程，不下载、不转码、不转录。
+# 其余（url/local/upload）为视频/音频来源。
 TEXT_SOURCE_TYPES = {"web", "doc", "doc_upload"}
+# 图片来源：本地图片 / 上传图片 / 图片直链，OCR 提取文字后按文档流程学习
+IMAGE_SOURCE_TYPES = {"image", "image_upload", "image_url"}
+# 非媒体来源（文档 + 图片）统一走文档管道
+DOC_SOURCE_TYPES = TEXT_SOURCE_TYPES | IMAGE_SOURCE_TYPES
 
 
 def is_text_source(source_type: str) -> bool:
-    return source_type in TEXT_SOURCE_TYPES
+    """非媒体来源（文档 / 图片）：走文档管道，而非视频下载转录管道。"""
+    return source_type in DOC_SOURCE_TYPES
+
+
+def is_image_source(source_type: str) -> bool:
+    return source_type in IMAGE_SOURCE_TYPES
+
+
+def content_kind_for(source_type: str) -> str:
+    """决定前端呈现形态：image（原图+OCR）/ text（阅读器）/ video（播放器）。"""
+    if source_type in IMAGE_SOURCE_TYPES:
+        return "image"
+    if source_type in TEXT_SOURCE_TYPES:
+        return "text"
+    return "video"
 
 
 _YT_HOSTS = {
@@ -114,11 +133,12 @@ def file_fingerprint(path: str | Path, chunk: int = 1 << 20) -> str:
 class Job:
     id: str
     url: str                      # 来源标识：URL / 本地路径 / 上传文件路径
-    source_type: str = "url"      # 'url'|'local'|'upload'（视频）| 'web'|'doc'|'doc_upload'（文本）
-    content_kind: str = "video"   # 'video' | 'text'：决定前端走播放器还是阅读器
+    source_type: str = "url"      # 视频:'url'|'local'|'upload'；文本:'web'|'doc'|'doc_upload'；图片:'image'|'image_upload'|'image_url'
+    content_kind: str = "video"   # 'video' | 'text' | 'image'：决定前端走播放器/阅读器/原图视图
     status: str = "queued"
     error: str = ""
     video_path: str = ""          # 本地可播放 mp4 绝对路径
+    image_path: str = ""          # 图片来源：原图本地绝对路径（供 /api/image 服务）
     duration: float = 0.0
     src_lang: str = ""            # 'en' | 'zh'
     title: str = ""
@@ -161,6 +181,7 @@ class Job:
                 "src_lang": self.src_lang,
                 "title": self.title,
                 "video_url": f"/api/video/{self.id}" if self.video_path else "",
+                "image_url": f"/api/image/{self.id}" if self.image_path else "",
                 "segments": segs,
             }
 
@@ -188,7 +209,7 @@ class JobRegistry:
             existing = self._jobs.get(jid)
             if existing is not None:
                 return existing, False
-            kind = "text" if is_text_source(source_type) else "video"
+            kind = content_kind_for(source_type)
             job = Job(id=jid, url=source, source_type=source_type, content_kind=kind)
             self._jobs[jid] = job
             return job, True
@@ -210,9 +231,11 @@ def save_result(job: Job) -> None:
         "title": job.title,
         "segments": job.segments,
     }
-    if job.content_kind == "text":
-        # 文本来源无视频文件，整包缓存 segments 供下次直接回放。
+    if job.content_kind in ("text", "image"):
+        # 文本/图片来源无视频文件，整包缓存 segments 供下次直接回放。
         data["source_type"] = job.source_type
+        if job.content_kind == "image" and job.image_path:
+            data["image_path"] = job.image_path
     else:
         if not job.video_path:
             return
